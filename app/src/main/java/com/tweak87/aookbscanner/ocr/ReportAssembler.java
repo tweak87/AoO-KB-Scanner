@@ -94,10 +94,14 @@ public final class ReportAssembler {
         for (ParticipantFrame participant : frame.participants) events.add(Event.participant(participant));
         for (UnitFrame unit : frame.units) events.add(Event.unit(unit));
         for (BonusFrame bonus : frame.bonuses) events.add(Event.bonus(bonus));
+        if (frame.technologyHeaderSeen && frame.technologyHeaderY >= 0) {
+            events.add(Event.technologyHeader(frame.technologyHeaderY));
+        }
+        if (frame.technologyEndSeen && frame.technologyEndY >= 0) {
+            events.add(Event.technologyEnd(frame.technologyEndY));
+        }
         events.sort(Comparator.comparingInt(event -> event.y));
 
-        boolean anyUnit = false;
-        boolean anyBonus = false;
         for (Event event : events) {
             if (event.participant != null) {
                 active = database.upsertParticipant(currentReportId, event.participant);
@@ -107,7 +111,7 @@ public final class ReportAssembler {
                 try {
                     String signature = database.ensureUnitType(unit.iconHash, png(unit.icon), unit.tier);
                     database.upsertUnit(active, signature, unit);
-                    anyUnit = true;
+                    database.markProgress(active, true, false, false);
                 } finally {
                     if (unit.icon != null && !unit.icon.isRecycled()) unit.icon.recycle();
                 }
@@ -115,15 +119,14 @@ public final class ReportAssembler {
                 BonusFrame bonus = event.bonus;
                 database.upsertBonus(active, TextNormalization.key(bonus.label), bonus.label,
                         bonus.rawValue, bonus.primaryValue);
-                anyBonus = true;
+                database.markProgress(active, false, true, false);
+            } else if (event.technologyHeader && active >= 0) {
+                database.markProgress(active, false, true, false);
+            } else if (event.technologyEnd && active >= 0) {
+                database.markProgress(active, false, true, true);
             }
         }
-        if (active >= 0) {
-            database.markProgress(active, anyUnit,
-                    frame.technologyHeaderSeen || anyBonus,
-                    frame.technologyEndSeen);
-            activeParticipants.put(side, active);
-        }
+        if (active >= 0) activeParticipants.put(side, active);
     }
 
     private String displayId(String gameTimestamp, String fingerprint) {
@@ -158,13 +161,19 @@ public final class ReportAssembler {
         final ParticipantFrame participant;
         final UnitFrame unit;
         final BonusFrame bonus;
+        final boolean technologyHeader;
+        final boolean technologyEnd;
 
-        private Event(int y, ParticipantFrame participant, UnitFrame unit, BonusFrame bonus) {
+        private Event(int y, ParticipantFrame participant, UnitFrame unit, BonusFrame bonus,
+                      boolean technologyHeader, boolean technologyEnd) {
             this.y = y; this.participant = participant; this.unit = unit; this.bonus = bonus;
+            this.technologyHeader = technologyHeader; this.technologyEnd = technologyEnd;
         }
 
-        static Event participant(ParticipantFrame value) { return new Event(value.top, value, null, null); }
-        static Event unit(UnitFrame value) { return new Event(value.centerY, null, value, null); }
-        static Event bonus(BonusFrame value) { return new Event(value.centerY, null, null, value); }
+        static Event participant(ParticipantFrame value) { return new Event(value.top, value, null, null, false, false); }
+        static Event unit(UnitFrame value) { return new Event(value.centerY, null, value, null, false, false); }
+        static Event bonus(BonusFrame value) { return new Event(value.centerY, null, null, value, false, false); }
+        static Event technologyHeader(int y) { return new Event(y, null, null, null, true, false); }
+        static Event technologyEnd(int y) { return new Event(y, null, null, null, false, true); }
     }
 }

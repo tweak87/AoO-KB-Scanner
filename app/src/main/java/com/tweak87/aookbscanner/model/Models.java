@@ -94,6 +94,8 @@ public final class Models {
         public String fingerprintSeed = "";
         public boolean technologyHeaderSeen;
         public boolean technologyEndSeen;
+        public int technologyHeaderY = -1;
+        public int technologyEndY = -1;
         public final List<ParticipantFrame> participants = new ArrayList<>();
         public final List<UnitFrame> units = new ArrayList<>();
         public final List<BonusFrame> bonuses = new ArrayList<>();

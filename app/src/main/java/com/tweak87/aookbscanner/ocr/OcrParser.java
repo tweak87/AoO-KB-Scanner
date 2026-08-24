@@ -137,7 +137,10 @@ public final class OcrParser {
             String n = TextNormalization.normalize(line.text);
             if (n.equals("armee info") || n.equals("angreifer") || n.equals("verteidiger") || n.equals("technologiebonus")) {
                 parsed.boxes.add(new OverlayBox(line.bounds, BoxState.VALID));
-                if (n.equals("technologiebonus")) parsed.technologyHeaderSeen = true;
+                if (n.equals("technologiebonus")) {
+                    parsed.technologyHeaderSeen = true;
+                    parsed.technologyHeaderY = line.centerY();
+                }
             }
         }
 
@@ -147,6 +150,7 @@ public final class OcrParser {
         parsed.units.addAll(parseUnitRows(parsed, elements, frame, technologyY));
         parsed.bonuses.addAll(parseBonuses(parsed, lines));
         parsed.technologyEndSeen = hasTechnologyEnd(lines);
+        if (parsed.technologyEndSeen) parsed.technologyEndY = technologyEndY(lines);
     }
 
     private List<ParticipantFrame> parseParticipants(ParsedFrame parsed, List<OcrItem> lines,
@@ -306,6 +310,19 @@ public final class OcrParser {
         boolean troopLife = text.contains("truppen leben zusatzerhohung") || text.contains("truppen leben zusatz");
         boolean finalSpecial = text.contains("nahkampftruppen durch nah mittel und fernkampftruppen");
         return (titan && troopLife) || finalSpecial;
+    }
+
+    private int technologyEndY(List<OcrItem> lines) {
+        int result = -1;
+        for (OcrItem line : lines) {
+            String text = TextNormalization.normalize(line.text);
+            if (text.contains("titanschaden") || text.contains("titanen") ||
+                    text.contains("truppen leben zusatz") ||
+                    text.contains("nahkampftruppen durch nah mittel und fernkampftruppen")) {
+                result = Math.max(result, line.centerY());
+            }
+        }
+        return result;
     }
 
     private Side findArmySide(List<OcrItem> lines) {
