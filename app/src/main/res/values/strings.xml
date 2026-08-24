@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AoO KB Scanner</string>
+    <string name="channel_name">Kampfbericht-Scanner</string>
+    <string name="channel_description">Zeigt an, dass der Bildschirm lokal ausgewertet wird.</string>
+</resources>

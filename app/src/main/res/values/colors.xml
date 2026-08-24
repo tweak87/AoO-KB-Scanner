@@ -1,0 +1,9 @@
+<resources>
+    <color name="navy">#101A28</color>
+    <color name="navy_light">#1C2B3E</color>
+    <color name="accent">#35D07F</color>
+    <color name="warning">#FFC857</color>
+    <color name="danger">#FF5D68</color>
+    <color name="text_primary">#F4F7FB</color>
+    <color name="text_secondary">#B9C6D6</color>
+</resources>
