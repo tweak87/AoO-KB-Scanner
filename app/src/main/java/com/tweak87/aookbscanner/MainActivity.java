@@ -14,6 +14,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -31,6 +32,8 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button startButton;
     private Button stopButton;
+    private Switch eventModeSwitch;
+    private Switch resourceFieldSwitch;
     private boolean pendingStart;
     private boolean waitingForOverlay;
 
@@ -55,6 +58,29 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         page.addView(Ui.spacer(this, 12));
 
+        eventModeSwitch = new Switch(this);
+        eventModeSwitch.setText("Battle-Frenzy-Eventmodus");
+        eventModeSwitch.setTextColor(Ui.WHITE);
+        eventModeSwitch.setTextSize(16);
+        eventModeSwitch.setChecked(getPreferences(MODE_PRIVATE).getBoolean("event_mode", false));
+        page.addView(eventModeSwitch);
+        resourceFieldSwitch = new Switch(this);
+        resourceFieldSwitch.setText("Kampf auf Ressourcenfeld (50 % Punkte)");
+        resourceFieldSwitch.setTextColor(Ui.WHITE);
+        resourceFieldSwitch.setTextSize(15);
+        resourceFieldSwitch.setChecked(getPreferences(MODE_PRIVATE).getBoolean("resource_field", false));
+        resourceFieldSwitch.setEnabled(eventModeSwitch.isChecked());
+        resourceFieldSwitch.setAlpha(eventModeSwitch.isChecked() ? 1f : 0.45f);
+        page.addView(resourceFieldSwitch);
+        eventModeSwitch.setOnCheckedChangeListener((button, checked) -> {
+            resourceFieldSwitch.setEnabled(checked);
+            resourceFieldSwitch.setAlpha(checked ? 1f : 0.45f);
+            getPreferences(MODE_PRIVATE).edit().putBoolean("event_mode", checked).apply();
+        });
+        resourceFieldSwitch.setOnCheckedChangeListener((button, checked) ->
+                getPreferences(MODE_PRIVATE).edit().putBoolean("resource_field", checked).apply());
+        page.addView(Ui.spacer(this, 8));
+
         startButton = Ui.button(this, "Scanner starten & Spiel öffnen", Ui.GREEN);
         startButton.setOnClickListener(view -> beginStartFlow());
         page.addView(startButton);
@@ -72,8 +98,12 @@ public final class MainActivity extends Activity {
         page.addView(Ui.spacer(this, 18));
         TextView help = Ui.text(this,
                 "Ablauf\n1. Start drücken und Overlay erlauben.\n2. Bildschirmfreigabe bestätigen.\n" +
-                        "3. Im Spiel einen Schlachtbericht öffnen.\n4. Angreifer- und Verteidigerdetails langsam bis zum Ende scrollen.\n\n" +
+                        "3. Die Übersicht eines Schlachtberichts öffnen und im Overlay „Scan starten“ drücken.\n" +
+                        "4. Danach die Details jedes Angreifers und Verteidigers langsam bis zum Ende scrollen.\n" +
+                        "5. Nach dem letzten gezeigten Feld im Overlay „Scan beenden“ drücken.\n\n" +
                         "Grün = erkannt · Gelb = noch offen · Rot = unplausibel. " +
+                        "Im Eventmodus werden die Battle-Frenzy-Punkte live angezeigt. Titan und Kampfflugzeug " +
+                        "müssen beim ersten Auftreten in der Einheitenkonfiguration zugeordnet werden. " +
                         "Die App speichert keine Videoaufnahme und sendet keine Daten ins Internet.",
                 15, Ui.MUTED);
         help.setLineSpacing(Ui.dp(this, 2), 1.12f);
@@ -144,7 +174,10 @@ public final class MainActivity extends Activity {
             Intent service = new Intent(this, CaptureService.class)
                     .setAction(CaptureService.ACTION_START)
                     .putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
-                    .putExtra(CaptureService.EXTRA_RESULT_DATA, data);
+                    .putExtra(CaptureService.EXTRA_RESULT_DATA, data)
+                    .putExtra(CaptureService.EXTRA_EVENT_MODE, eventModeSwitch.isChecked())
+                    .putExtra(CaptureService.EXTRA_RESOURCE_FIELD,
+                            eventModeSwitch.isChecked() && resourceFieldSwitch.isChecked());
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
             else startService(service);
             launchGame();
@@ -174,5 +207,9 @@ public final class MainActivity extends Activity {
         status.setTextColor(running ? Ui.GREEN : Ui.AMBER);
         Ui.setEnabled(startButton, !running);
         Ui.setEnabled(stopButton, running);
+        eventModeSwitch.setEnabled(!running);
+        eventModeSwitch.setAlpha(running ? 0.45f : 1f);
+        resourceFieldSwitch.setEnabled(!running && eventModeSwitch.isChecked());
+        resourceFieldSwitch.setAlpha(!running && eventModeSwitch.isChecked() ? 1f : 0.45f);
     }
 }

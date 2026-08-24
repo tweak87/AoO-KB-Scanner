@@ -2,23 +2,49 @@
 
 Android-Prototyp zum lokalen Erfassen von Kampfberichten aus **Age of Origins**. Die App liest eine vom Nutzer freigegebene Bildschirmübertragung in kurzen Abständen, erkennt deutsche Berichtsfelder mit gebündeltem ML-Kit-OCR und führt überlappende Scroll-Ansichten in einer lokalen SQLite-Datenbank zusammen.
 
-## Funktionsumfang der ersten Version
+## Funktionsumfang
 
 - Startet über die Android-Bildschirmfreigabe (`MediaProjection`); es wird **keine Videodatei gespeichert**.
 - Erkennt Nachrichtenliste, Schlachtbericht-Übersicht und „Armee Info“ für Angreifer/Verteidiger.
 - Erfasst Teilnehmer, Koordinaten, Gesamtwerte, Einheitenzeilen und Technologieboni.
 - Zeigt ein durchklickbares Overlay: Grün erkannt, Gelb noch offen, Rot unplausibel.
-- Vergibt IDs im Format `KB-JJJJMMTT-HHMM-XXXXXXXX` und führt wiederholte/überlappende Bilder zusammen.
+- Erkennt zunächst den Schlachtbericht und fragt im Overlay nach dem Start. Erst mit „Scan beenden“ wird die Sitzung als genau ein Bericht abgeschlossen.
+- Vergibt IDs im Format `KB-JJJJMMTT-HHMM-XXXXXXXX` und führt alle wiederholten/überlappenden Scroll-Bilder zwischen Start und Ende zusammen.
 - Speichert alles nur lokal. Die App hat absichtlich keine Internet-Berechtigung.
 - Ordnet Einheitensymbole über einen Bild-Fingerabdruck zu. Name und Kategorie können unter „Einheitennamen konfigurieren“ korrigiert werden.
+- Berichte sind formatiert, in die Zwischenablage kopierbar und über Androids Dateiauswahl als mehrseitige PDF speicherbar.
+- Optionaler Battle-Frenzy-Modus zeigt Punkte live im Overlay und im fertigen Bericht. Ressourcenfeld-Kämpfe können mit 50 % gewertet werden.
 
 ## Benutzung
 
 1. Debug-APK installieren. Android warnt bei der Installation aus unbekannter Quelle; dies muss für die verwendete Datei-App bzw. den Browser erlaubt werden.
 2. In der Scanner-App „Scanner starten & Spiel öffnen“ wählen.
 3. Die Berechtigung „Über anderen Apps einblenden“ und die Android-Bildschirmfreigabe bestätigen.
-4. Einen Schlachtbericht öffnen und die Details **jedes Spielers beider Seiten langsam** von oben bis zum Ende der Technologieboni scrollen.
-5. Oben rechts zeigt das Overlay den Erfassungsfortschritt. Gespeicherte Daten stehen in „Erfasste Berichte“.
+4. Die Schlachtbericht-Übersicht öffnen und oben rechts „Scan starten“ drücken.
+5. Die Details **jedes Spielers beider Seiten langsam** von oben bis zum Ende der Technologieboni scrollen.
+6. Nach dem letzten Feld „Scan beenden“ drücken. Erst dann wird die eine zusammengeführte Sitzung abgeschlossen.
+7. Gespeicherte Daten stehen in „Erfasste Berichte“ und lassen sich dort kopieren oder als PDF speichern.
+
+## Battle-Frenzy-Punkte
+
+Gewertet werden verwundete plus gefallene Einheiten der Gegenseite. Pro Einheit gilt:
+
+| Stufe | Angreifer | Verteidiger |
+|---|---:|---:|
+| T1–T4 | 0 | 0 |
+| T5 | 2 | 1 |
+| T6 | 4 | 2 |
+| T7 | 7 | 3 |
+| T8 | 14 | 5 |
+| T9 | 24 | 8 |
+| T10 | 39 | 13 |
+| T11 | 50 | 16 |
+| T12 | 65 | 20 |
+| T13 | 80 | 25 |
+| Titan | 6.000 | 2.000 |
+| Kampfflugzeug | 6.000 | 2.000 |
+
+Spezialeinheiten werden beim ersten Auftreten unter „Einheitennamen konfigurieren“ als Titan oder Kampfflugzeug markiert. Bei Ressourcenfeldern wird die Gesamtsumme halbiert und bei ungeraden Werten abgerundet.
 
 Auf Huawei/EMUI kann es nötig sein, für den Scanner unter Akku/App-Start den automatischen Start und die Hintergrundausführung zu erlauben. Beim Drehen des Geräts sollte die laufende Erfassung neu gestartet werden.
 

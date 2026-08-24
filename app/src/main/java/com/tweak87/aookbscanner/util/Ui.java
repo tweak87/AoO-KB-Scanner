@@ -1,9 +1,11 @@
 package com.tweak87.aookbscanner.util;
 
+import android.app.Activity;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -69,6 +71,28 @@ public final class Ui {
         layout.setPadding(dp(context, 20), dp(context, 18), dp(context, 20), dp(context, 24));
         layout.setBackgroundColor(NAVY);
         return layout;
+    }
+
+    public static LinearLayout backHeader(Activity activity, String value) {
+        LinearLayout header = new LinearLayout(activity);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button back = new Button(activity);
+        back.setText("‹");
+        back.setTextSize(30);
+        back.setTextColor(WHITE);
+        back.setAllCaps(false);
+        back.setContentDescription("Zurück zum Hauptmenü");
+        back.setBackground(rounded(PANEL, dp(activity, 12), 0, 0));
+        back.setOnClickListener(view -> activity.finish());
+        LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(activity, 52), dp(activity, 52));
+        backParams.setMargins(0, 0, dp(activity, 12), 0);
+        header.addView(back, backParams);
+
+        TextView heading = title(activity, value);
+        header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return header;
     }
 
     public static void setEnabled(Button button, boolean enabled) {

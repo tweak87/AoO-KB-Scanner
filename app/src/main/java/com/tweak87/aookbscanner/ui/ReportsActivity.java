@@ -7,6 +7,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
@@ -30,7 +31,7 @@ public final class ReportsActivity extends Activity {
         ListView list = new ListView(this);
         list.setBackgroundColor(Ui.NAVY);
         list.setDividerHeight(Ui.dp(this, 8));
-        list.setPadding(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12));
+        list.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 12));
         adapter = new ArrayAdapter<ReportRow>(this, android.R.layout.simple_list_item_1, rows) {
             @Override public View getView(int position, View convertView, ViewGroup parent) {
                 TextView view = (TextView) super.getView(position, convertView, parent);
@@ -44,21 +45,25 @@ public final class ReportsActivity extends Activity {
         };
         list.setAdapter(adapter);
         TextView empty = emptyView();
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Ui.NAVY);
-        root.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        FrameLayout listRoot = new FrameLayout(this);
+        listRoot.setBackgroundColor(Ui.NAVY);
+        listRoot.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
         FrameLayout.LayoutParams emptyParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         emptyParams.gravity = android.view.Gravity.CENTER;
-        root.addView(empty, emptyParams);
+        listRoot.addView(empty, emptyParams);
         list.setEmptyView(empty);
         list.setOnItemClickListener((parent, view, position, id) -> {
             Intent detail = new Intent(this, ReportDetailActivity.class);
             detail.putExtra(ReportDetailActivity.EXTRA_REPORT_ID, rows.get(position).id);
             startActivity(detail);
         });
-        setContentView(root);
+        LinearLayout page = Ui.verticalPage(this);
+        page.addView(Ui.backHeader(this, "Erfasste Berichte"));
+        page.addView(listRoot, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        setContentView(page);
     }
 
     private TextView emptyView() {

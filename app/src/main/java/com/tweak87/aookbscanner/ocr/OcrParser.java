@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -148,7 +149,7 @@ public final class OcrParser {
         parsed.participants.addAll(participants);
         int technologyY = findTextY(lines, "technologiebonus", height + 1);
         parsed.units.addAll(parseUnitRows(parsed, elements, frame, technologyY));
-        parsed.bonuses.addAll(parseBonuses(parsed, lines));
+        parsed.bonuses.addAll(parseBonuses(parsed, lines, elements, width, height));
         parsed.technologyEndSeen = hasTechnologyEnd(lines);
         if (parsed.technologyEndSeen) parsed.technologyEndY = technologyEndY(lines);
     }
@@ -278,27 +279,95 @@ public final class OcrParser {
         return units;
     }
 
-    private List<BonusFrame> parseBonuses(ParsedFrame parsed, List<OcrItem> lines) {
-        List<BonusFrame> bonuses = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
+    private List<BonusFrame> parseBonuses(ParsedFrame parsed, List<OcrItem> lines,
+                                          List<OcrItem> elements, int width, int height) {
+        Map<String, BonusFrame> bonuses = new LinkedHashMap<>();
         for (OcrItem line : lines) {
             String normalized = TextNormalization.normalize(line.text);
             String rawValue = NumberParser.findLastNumber(line.text);
             if (rawValue == null || (!rawValue.contains("%") && !containsBonusMarker(normalized))) continue;
             int valueAt = line.text.lastIndexOf(rawValue);
-            String label = valueAt > 0 ? line.text.substring(0, valueAt).trim() : "";
+            String rawLabel = valueAt > 0 ? line.text.substring(0, valueAt).trim() : "";
+            String knownLabel = BonusCatalog.matchKnown(rawLabel);
+            // A line spanning both columns mixes two cells; the spatial pass below separates it.
+            if (knownLabel == null && line.bounds.width() > width * 0.52f) continue;
+            String label = knownLabel == null ? BonusCatalog.canonicalize(rawLabel) : knownLabel;
             String key = TextNormalization.key(label);
-            if (label.length() < 3 || key.isEmpty() || isSummaryLabel(normalized) || !containsBonusMarker(normalized) || !seen.add(key)) continue;
-            BonusFrame bonus = new BonusFrame();
-            bonus.label = label;
-            bonus.rawValue = rawValue;
-            bonus.primaryValue = NumberParser.parsePrimaryDecimal(rawValue);
-            bonus.bounds = line.bounds;
-            bonus.centerY = line.centerY();
-            bonuses.add(bonus);
-            parsed.boxes.add(new OverlayBox(line.bounds, bonus.primaryValue == null ? BoxState.INVALID : BoxState.VALID));
+            if (label.length() < 3 || key.isEmpty() || isSummaryLabel(normalized) || !containsBonusMarker(normalized)) continue;
+            putBonus(bonuses, label, rawValue, line.bounds, line.centerY());
         }
-        return bonuses;
+
+        // ML Kit often emits the small two-line label and its large value as separate lines.
+        // Reconstruct each grid cell spatially and map it to the canonical label catalog.
+        int headerY = findTextY(lines, "technologiebonus", height + 1);
+        int tolerance = Math.max(12, Math.round(width * 0.030f));
+        if (headerY < height) {
+            for (OcrItem value : elements) {
+                if (!isBonusValue(value.text) || value.centerY() <= headerY ||
+                        value.centerY() > height * 0.87f || value.centerX() < width * 0.24f) continue;
+                boolean leftHalf = value.centerX() < width / 2;
+                int cellLeft = Math.round(width * (leftHalf ? 0.05f : 0.50f));
+                int cellRight = Math.round(width * (leftHalf ? 0.50f : 0.96f));
+                List<OcrItem> values = new ArrayList<>();
+                for (OcrItem candidate : elements) {
+                    if (candidate.centerX() < cellLeft || candidate.centerX() >= cellRight ||
+                            Math.abs(candidate.centerY() - value.centerY()) > Math.max(7, tolerance / 2) ||
+                            !isBonusValue(candidate.text)) continue;
+                    values.add(candidate);
+                }
+                if (values.isEmpty()) continue;
+                values.sort(Comparator.comparingInt(OcrItem::centerX));
+                int firstValueX = values.get(0).bounds.left;
+                List<OcrItem> labels = new ArrayList<>();
+                for (OcrItem candidate : elements) {
+                    if (candidate.centerX() < cellLeft || candidate.centerX() >= cellRight ||
+                            candidate.bounds.right >= firstValueX ||
+                            Math.abs(candidate.centerY() - value.centerY()) > tolerance ||
+                            isBonusValue(candidate.text)) continue;
+                    String normalized = TextNormalization.normalize(candidate.text);
+                    if (normalized.equals("technologiebonus") || normalized.equals("angreifer") ||
+                            normalized.equals("verteidiger") || normalized.equals("armee info")) continue;
+                    labels.add(candidate);
+                }
+                if (labels.isEmpty()) continue;
+                labels.sort(Comparator.comparingInt(OcrItem::centerY).thenComparingInt(OcrItem::centerX));
+                StringBuilder rawLabel = new StringBuilder();
+                for (OcrItem label : labels) rawLabel.append(label.text).append(' ');
+                String canonical = BonusCatalog.matchKnown(rawLabel.toString());
+                if (canonical == null) continue;
+                StringBuilder rawValue = new StringBuilder();
+                for (OcrItem item : values) rawValue.append(item.text).append(' ');
+                Rect bounds = new Rect(labels.get(0).bounds);
+                for (OcrItem item : labels) bounds.union(item.bounds);
+                for (OcrItem item : values) bounds.union(item.bounds);
+                putBonus(bonuses, canonical, rawValue.toString().trim(), bounds, value.centerY());
+            }
+        }
+
+        List<BonusFrame> result = new ArrayList<>(bonuses.values());
+        for (BonusFrame bonus : result) parsed.boxes.add(new OverlayBox(bonus.bounds,
+                bonus.primaryValue == null ? BoxState.INVALID : BoxState.VALID));
+        return result;
+    }
+
+    private void putBonus(Map<String, BonusFrame> bonuses, String label, String rawValue,
+                          Rect bounds, int centerY) {
+        String key = TextNormalization.key(label);
+        BonusFrame current = bonuses.get(key);
+        if (current != null && current.primaryValue != null &&
+                current.rawValue.length() >= rawValue.length()) return;
+        BonusFrame bonus = new BonusFrame();
+        bonus.label = label;
+        bonus.rawValue = rawValue;
+        bonus.primaryValue = NumberParser.parsePrimaryDecimal(rawValue);
+        bonus.bounds = new Rect(bounds);
+        bonus.centerY = centerY;
+        bonuses.put(key, bonus);
+    }
+
+    private boolean isBonusValue(String text) {
+        if (text == null || NumberParser.findLastNumber(text) == null) return false;
+        return text.replaceAll("[\\d\\s.,%()+-]", "").isEmpty();
     }
 
     private boolean hasTechnologyEnd(List<OcrItem> lines) {

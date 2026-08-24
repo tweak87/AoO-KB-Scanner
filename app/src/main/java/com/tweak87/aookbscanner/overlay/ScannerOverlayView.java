@@ -64,10 +64,12 @@ public final class ScannerOverlayView extends View {
 
     private void drawStatus(Canvas canvas) {
         float padding = dp(10);
-        float textWidth = label.measureText(status);
-        float height = dp(34);
+        String[] lines = status.split("\\n", -1);
+        float textWidth = 0;
+        for (String line : lines) textWidth = Math.max(textWidth, label.measureText(line));
+        float height = dp(lines.length > 1 ? 54 : 34);
         float right = getWidth() - dp(8);
-        float left = Math.max(dp(8), right - textWidth - padding * 2);
+        float left = Math.max(dp(8), right - Math.min(textWidth, getWidth() - dp(36)) - padding * 2);
         float top = dp(8);
         chip.setColor(Color.argb(225, 12, 22, 33));
         chip.setStyle(Paint.Style.FILL);
@@ -76,7 +78,9 @@ public final class ScannerOverlayView extends View {
         chip.setStrokeWidth(dp(2));
         chip.setColor(color(statusState));
         canvas.drawRoundRect(new RectF(left, top, right, top + height), dp(10), dp(10), chip);
-        canvas.drawText(status, left + padding, top + dp(22), label);
+        for (int i = 0; i < lines.length; i++) {
+            canvas.drawText(lines[i], left + padding, top + dp(22 + i * 19), label);
+        }
     }
 
     private int color(BoxState state) {

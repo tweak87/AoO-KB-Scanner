@@ -32,11 +32,15 @@ import com.tweak87.aookbscanner.MainActivity;
 import com.tweak87.aookbscanner.R;
 import com.tweak87.aookbscanner.db.ScannerDatabase;
 import com.tweak87.aookbscanner.model.Models.AnalysisResult;
+import com.tweak87.aookbscanner.model.Models.BoxState;
+import com.tweak87.aookbscanner.model.Models.ParsedFrame;
+import com.tweak87.aookbscanner.model.Models.ScreenType;
 import com.tweak87.aookbscanner.ocr.OcrParser;
 import com.tweak87.aookbscanner.ocr.ReportAssembler;
 import com.tweak87.aookbscanner.overlay.OverlayController;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,6 +51,8 @@ public final class CaptureService extends Service {
     public static final String ACTION_STOP = "com.tweak87.aookbscanner.STOP";
     public static final String EXTRA_RESULT_CODE = "result_code";
     public static final String EXTRA_RESULT_DATA = "result_data";
+    public static final String EXTRA_EVENT_MODE = "event_mode";
+    public static final String EXTRA_RESOURCE_FIELD = "resource_field";
     public static volatile boolean isRunning;
 
     private static final String CHANNEL_ID = "aoo_scanner_capture";
@@ -69,6 +75,14 @@ public final class CaptureService extends Service {
     private int captureHeight;
     private long lastFrameAt;
     private boolean shuttingDown;
+    private volatile ScanState scanState = ScanState.WAITING;
+    private ParsedFrame pendingHeader;
+    private boolean eventMode;
+    private boolean resourceField;
+    private int outsideReportFrames;
+    private String finishedStatus = "Bericht gespeichert";
+
+    private enum ScanState { WAITING, READY, SCANNING, WAIT_FOR_EXIT }
 
     @Override
     public void onCreate() {
@@ -95,6 +109,8 @@ public final class CaptureService extends Service {
         startForegroundCompat(buildNotification("Scanner wird gestartet …"));
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED);
         Intent resultData = parcelableIntent(intent, EXTRA_RESULT_DATA);
+        eventMode = intent.getBooleanExtra(EXTRA_EVENT_MODE, false);
+        resourceField = eventMode && intent.getBooleanExtra(EXTRA_RESOURCE_FIELD, false);
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopCapture();
             return START_NOT_STICKY;
@@ -155,15 +171,75 @@ public final class CaptureService extends Service {
 
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener(analysisExecutor, text -> {
-                    AnalysisResult result = assembler.consume(parser.parse(text, bitmap));
+                    ParsedFrame parsed = parser.parse(text, bitmap);
+                    AnalysisResult result = handleParsedFrame(parsed);
                     overlay.update(result, bitmap.getWidth(), bitmap.getHeight());
-                    notifyStatus(result.status);
+                    notifyStatus(result.status.replace('\n', ' '));
                 })
                 .addOnFailureListener(analysisExecutor, error -> notifyStatus("OCR-Fehler · weiter scannen"))
                 .addOnCompleteListener(analysisExecutor, task -> {
                     if (!bitmap.isRecycled()) bitmap.recycle();
                     processing.set(false);
                 });
+    }
+
+    private synchronized AnalysisResult handleParsedFrame(ParsedFrame frame) {
+        if (scanState == ScanState.WAITING) {
+            if (frame.screenType == ScreenType.BATTLE_SUMMARY) {
+                pendingHeader = frame;
+                scanState = ScanState.READY;
+                overlay.showControl("Scan starten", () -> analysisExecutor.execute(this::beginScanSession));
+                String mode = eventMode ? "\nBattle Frenzy" + (resourceField ? " · Ressourcenfeld" : "") : "";
+                return new AnalysisResult(frame.boxes, "Bericht erkannt · Scan starten" + mode, BoxState.VALID);
+            }
+            if (frame.screenType == ScreenType.MESSAGE_LIST) {
+                return new AnalysisResult(frame.boxes, "Nachrichten erkannt · Bericht öffnen", BoxState.PENDING);
+            }
+            return new AnalysisResult(frame.boxes, "Scanner aktiv · wartet auf Bericht", BoxState.PENDING);
+        }
+
+        if (scanState == ScanState.READY) {
+            if (frame.screenType == ScreenType.BATTLE_SUMMARY) pendingHeader = frame;
+            if (frame.screenType == ScreenType.MESSAGE_LIST) {
+                pendingHeader = null;
+                scanState = ScanState.WAITING;
+                overlay.hideControl();
+                return new AnalysisResult(frame.boxes, "Scan verworfen · Bericht öffnen", BoxState.PENDING);
+            }
+            return new AnalysisResult(frame.boxes, "Bericht erkannt · Scan starten", BoxState.VALID);
+        }
+
+        if (scanState == ScanState.SCANNING) return assembler.acceptFrame(frame);
+
+        boolean outside = frame.screenType == ScreenType.MESSAGE_LIST || frame.screenType == ScreenType.NONE;
+        outsideReportFrames = outside ? outsideReportFrames + 1 : 0;
+        if (outsideReportFrames >= 2) {
+            scanState = ScanState.WAITING;
+            outsideReportFrames = 0;
+            return new AnalysisResult(frame.boxes, "Scanner aktiv · wartet auf Bericht", BoxState.PENDING);
+        }
+        return new AnalysisResult(new ArrayList<>(), finishedStatus + "\nZur Nachrichtenliste zurück", BoxState.VALID);
+    }
+
+    private synchronized void beginScanSession() {
+        if (scanState != ScanState.READY || pendingHeader == null) return;
+        AnalysisResult result = assembler.startSession(pendingHeader, eventMode, resourceField);
+        pendingHeader = null;
+        scanState = ScanState.SCANNING;
+        overlay.showControl("Scan beenden", () -> analysisExecutor.execute(this::finishScanSession));
+        overlay.update(result, captureWidth, captureHeight);
+        notifyStatus("Berichtsscan läuft");
+    }
+
+    private synchronized void finishScanSession() {
+        if (scanState != ScanState.SCANNING) return;
+        AnalysisResult result = assembler.finishSession();
+        finishedStatus = result.status;
+        scanState = ScanState.WAIT_FOR_EXIT;
+        outsideReportFrames = 0;
+        overlay.hideControl();
+        overlay.update(result, captureWidth, captureHeight);
+        notifyStatus("Bericht gespeichert");
     }
 
     private Bitmap imageToBitmap(Image image, int width, int height) {
@@ -232,6 +308,7 @@ public final class CaptureService extends Service {
         if (shuttingDown) return;
         shuttingDown = true;
         isRunning = false;
+        if (assembler != null && assembler.isSessionActive()) assembler.finishSession();
         if (imageReader != null) {
             imageReader.setOnImageAvailableListener(null, null);
             imageReader.close();

@@ -3,6 +3,7 @@ package com.tweak87.aookbscanner.ocr;
 import android.graphics.Bitmap;
 
 import com.tweak87.aookbscanner.db.ScannerDatabase;
+import com.tweak87.aookbscanner.db.ScannerDatabase.EventPoints;
 import com.tweak87.aookbscanner.db.ScannerDatabase.Progress;
 import com.tweak87.aookbscanner.model.Models.AnalysisResult;
 import com.tweak87.aookbscanner.model.Models.BonusFrame;
@@ -26,7 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
-/** Combines overlapping OCR frames into one durable battle report. */
+/** Combines every overlapping OCR frame between explicit Start and Finish into one report. */
 public final class ReportAssembler {
     private final ScannerDatabase database;
     private final Map<Side, Long> activeParticipants = new EnumMap<>(Side.class);
@@ -37,56 +38,67 @@ public final class ReportAssembler {
         this.database = database;
     }
 
-    public synchronized AnalysisResult consume(ParsedFrame frame) {
-        if (frame.screenType == ScreenType.BATTLE_SUMMARY) {
-            acceptHeader(frame);
-            return new AnalysisResult(frame.boxes, "Kampfbericht erkannt · " + currentDisplayId, BoxState.VALID);
-        }
-        if (frame.screenType == ScreenType.ARMY_INFO) {
-            ensureFallbackReport();
-            acceptArmyFrame(frame);
-            Progress progress = database.getProgress(currentReportId);
-            return new AnalysisResult(frame.boxes, progress.label(), progress.complete ? BoxState.VALID : BoxState.PENDING);
-        }
-        if (frame.screenType == ScreenType.MESSAGE_LIST) {
-            return new AnalysisResult(frame.boxes, "Nachrichten erkannt · Bericht öffnen", BoxState.PENDING);
-        }
-        return new AnalysisResult(frame.boxes, "Scanner aktiv", BoxState.PENDING);
-    }
-
-    private void acceptHeader(ParsedFrame frame) {
-        String seed = frame.fingerprintSeed == null ? "" : frame.fingerprintSeed;
-        String fingerprint = seed.isEmpty() ? null : Hashing.sha256(seed);
-        String existing = database.findReportByFingerprint(fingerprint);
-        if (existing != null) {
-            if (!existing.equals(currentReportId)) activeParticipants.clear();
-            currentReportId = existing;
-            currentDisplayId = displayId(frame.battleTimestamp, fingerprint);
-            database.updateReportHeader(existing, fingerprint, frame.battleTimestamp, frame.result,
-                    frame.reportX, frame.reportY, frame.expectedAttackers, frame.expectedDefenders);
-            return;
-        }
-
-        // A newly opened summary starts a new capture, even if the previous report is still incomplete.
+    public synchronized AnalysisResult startSession(ParsedFrame header,
+                                                    boolean eventMode, boolean resourceField) {
+        if (currentReportId != null) return status(header.boxes);
         currentReportId = UUID.randomUUID().toString();
-        currentDisplayId = displayId(frame.battleTimestamp, fingerprint);
+        String fingerprint = Hashing.sha256("scan-session|" + currentReportId);
+        currentDisplayId = displayId(header.battleTimestamp, fingerprint);
         activeParticipants.clear();
-        database.insertReport(currentReportId, currentDisplayId, fingerprint, frame.battleTimestamp,
-                frame.result, frame.reportX, frame.reportY,
-                frame.expectedAttackers == null ? 0 : frame.expectedAttackers,
-                frame.expectedDefenders == null ? 0 : frame.expectedDefenders);
+        database.insertReport(currentReportId, currentDisplayId, fingerprint,
+                header.battleTimestamp, header.result, header.reportX, header.reportY,
+                header.expectedAttackers == null ? 0 : header.expectedAttackers,
+                header.expectedDefenders == null ? 0 : header.expectedDefenders,
+                eventMode, resourceField);
+        return status(header.boxes);
     }
 
-    private void ensureFallbackReport() {
-        if (currentReportId != null) return;
-        currentReportId = UUID.randomUUID().toString();
-        currentDisplayId = displayId("", Hashing.sha256(currentReportId));
-        database.insertReport(currentReportId, currentDisplayId, null, "", "", null, null, 0, 0);
+    public synchronized AnalysisResult acceptFrame(ParsedFrame frame) {
+        if (currentReportId == null) {
+            return new AnalysisResult(frame.boxes, "Kein Scan gestartet", BoxState.PENDING);
+        }
+        if (frame.screenType == ScreenType.BATTLE_SUMMARY) {
+            database.updateReportHeader(currentReportId, null, frame.battleTimestamp, frame.result,
+                    frame.reportX, frame.reportY, frame.expectedAttackers, frame.expectedDefenders);
+        } else if (frame.screenType == ScreenType.ARMY_INFO) {
+            acceptArmyFrame(frame);
+        }
+        return status(frame.boxes);
+    }
+
+    public synchronized AnalysisResult finishSession() {
+        if (currentReportId == null) {
+            return new AnalysisResult(new ArrayList<>(), "Kein Scan aktiv", BoxState.PENDING);
+        }
+        String display = currentDisplayId;
+        database.finalizeReport(currentReportId);
+        Progress progress = database.getProgress(currentReportId);
+        EventPoints points = database.getEventPoints(currentReportId);
+        String message = "Gespeichert · " + display + "\n" + progress.label();
+        if (points.eventMode) message += " · " + points.overlayLabel();
+        currentReportId = null;
+        currentDisplayId = null;
+        activeParticipants.clear();
+        return new AnalysisResult(new ArrayList<>(), message,
+                progress.complete ? BoxState.VALID : BoxState.PENDING);
+    }
+
+    public synchronized boolean isSessionActive() { return currentReportId != null; }
+
+    private AnalysisResult status(List<com.tweak87.aookbscanner.model.Models.OverlayBox> boxes) {
+        Progress progress = database.getProgress(currentReportId);
+        EventPoints points = database.recalculateEventPoints(currentReportId);
+        String message = progress.label();
+        if (points.eventMode) message += "\n" + points.overlayLabel();
+        return new AnalysisResult(boxes, message, progress.complete ? BoxState.VALID : BoxState.PENDING);
     }
 
     private void acceptArmyFrame(ParsedFrame frame) {
         Side side = frame.side;
-        if (side == Side.UNKNOWN) return;
+        if (side == Side.UNKNOWN) {
+            recycleUnits(frame.units);
+            return;
+        }
         long active = activeParticipants.containsKey(side)
                 ? activeParticipants.get(side) : database.latestParticipantId(currentReportId, side);
 
@@ -94,24 +106,22 @@ public final class ReportAssembler {
         for (ParticipantFrame participant : frame.participants) events.add(Event.participant(participant));
         for (UnitFrame unit : frame.units) events.add(Event.unit(unit));
         for (BonusFrame bonus : frame.bonuses) events.add(Event.bonus(bonus));
-        if (frame.technologyHeaderSeen && frame.technologyHeaderY >= 0) {
-            events.add(Event.technologyHeader(frame.technologyHeaderY));
-        }
-        if (frame.technologyEndSeen && frame.technologyEndY >= 0) {
-            events.add(Event.technologyEnd(frame.technologyEndY));
-        }
+        if (frame.technologyHeaderSeen && frame.technologyHeaderY >= 0) events.add(Event.technologyHeader(frame.technologyHeaderY));
+        if (frame.technologyEndSeen && frame.technologyEndY >= 0) events.add(Event.technologyEnd(frame.technologyEndY));
         events.sort(Comparator.comparingInt(event -> event.y));
 
         for (Event event : events) {
             if (event.participant != null) {
                 active = database.upsertParticipant(currentReportId, event.participant);
                 activeParticipants.put(side, active);
-            } else if (event.unit != null && active >= 0) {
+            } else if (event.unit != null) {
                 UnitFrame unit = event.unit;
                 try {
-                    String signature = database.ensureUnitType(unit.iconHash, png(unit.icon), unit.tier);
-                    database.upsertUnit(active, signature, unit);
-                    database.markProgress(active, true, false, false);
+                    if (active >= 0) {
+                        String signature = database.ensureUnitType(unit.iconHash, png(unit.icon), unit.tier);
+                        database.upsertUnit(active, signature, unit);
+                        database.markProgress(active, true, false, false);
+                    }
                 } finally {
                     if (unit.icon != null && !unit.icon.isRecycled()) unit.icon.recycle();
                 }
@@ -140,13 +150,11 @@ public final class ReportAssembler {
                 calendar.set(Calendar.HOUR_OF_DAY, parsed.get(Calendar.HOUR_OF_DAY));
                 calendar.set(Calendar.MINUTE, parsed.get(Calendar.MINUTE));
             } catch (ParseException ignored) {
-                // The current date still produces a unique and readable fallback ID.
+                // Current time is a readable fallback.
             }
         }
         String date = new SimpleDateFormat("yyyyMMdd-HHmm", Locale.ROOT).format(calendar.getTime());
-        String suffix = fingerprint == null ? UUID.randomUUID().toString().substring(0, 8)
-                : fingerprint.substring(0, Math.min(8, fingerprint.length()));
-        return "KB-" + date + "-" + suffix.toUpperCase(Locale.ROOT);
+        return "KB-" + date + "-" + fingerprint.substring(0, 8).toUpperCase(Locale.ROOT);
     }
 
     private byte[] png(Bitmap bitmap) {
@@ -154,6 +162,10 @@ public final class ReportAssembler {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
         return output.toByteArray();
+    }
+
+    private void recycleUnits(List<UnitFrame> units) {
+        for (UnitFrame unit : units) if (unit.icon != null && !unit.icon.isRecycled()) unit.icon.recycle();
     }
 
     private static final class Event {
