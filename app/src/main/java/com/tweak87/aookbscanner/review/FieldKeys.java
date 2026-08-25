@@ -76,12 +76,32 @@ public final class FieldKeys {
     public static String normalizeValue(String raw) {
         if (raw == null || raw.trim().isEmpty() || "—".equals(raw.trim())) return "";
         Double decimal = NumberParser.parsePrimaryDecimal(raw);
-        if (raw.contains("%") || raw.contains("(") || raw.matches(".*[.,]\\d{1,2}%?.*")) {
+        if (looksLikeDecimal(raw)) {
             if (decimal != null) return String.format(Locale.ROOT, "%.4f", decimal);
         }
         Long integer = NumberParser.parseLong(raw);
         if (integer != null) return Long.toString(integer);
         return TextNormalization.normalize(raw);
+    }
+
+    private static boolean looksLikeDecimal(String raw) {
+        if (raw.contains("%") || raw.contains("(")) return true;
+        String numeric = NumberParser.findLastNumber(raw);
+        if (numeric == null) return false;
+        int commas = count(numeric, ',');
+        int dots = count(numeric, '.');
+        if (commas > 0 && dots > 0) return true;
+        if (commas + dots != 1) return false;
+        int separator = Math.max(numeric.lastIndexOf(','), numeric.lastIndexOf('.'));
+        int digits = numeric.replaceAll("[^0-9]", "").length();
+        int digitsAfter = numeric.substring(separator + 1).replaceAll("[^0-9]", "").length();
+        return digits > digitsAfter && digitsAfter > 0 && digitsAfter <= 2;
+    }
+
+    private static int count(String value, char needle) {
+        int result = 0;
+        for (int i = 0; i < value.length(); i++) if (value.charAt(i) == needle) result++;
+        return result;
     }
 
     private static String clean(String value) { return value == null ? "" : value.trim(); }
