@@ -75,7 +75,7 @@ public final class OverlayController {
                         dp(48), type, flags, PixelFormat.TRANSLUCENT);
                 params.gravity = Gravity.TOP | Gravity.END;
                 params.x = dp(8);
-                params.y = dp(70);
+                params.y = dp(112);
                 windowManager.addView(controlButton, params);
             }
             controlButton.setText(label);

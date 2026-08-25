@@ -11,7 +11,14 @@ public final class ImageHash {
     public static long differenceHash(Bitmap source) {
         int usefulHeight = Math.max(1, Math.round(source.getHeight() * 0.76f));
         Bitmap body = Bitmap.createBitmap(source, 0, 0, source.getWidth(), usefulHeight);
-        Bitmap scaled = Bitmap.createScaledBitmap(body, 9, 8, true);
+        long hash = differenceHashFull(body);
+        if (body != source) body.recycle();
+        return hash;
+    }
+
+    /** Hashes the complete crop, used for the small Roman numeral badge. */
+    public static long differenceHashFull(Bitmap source) {
+        Bitmap scaled = Bitmap.createScaledBitmap(source, 9, 8, true);
         long hash = 0L;
         int bit = 0;
         for (int y = 0; y < 8; y++) {
@@ -23,7 +30,6 @@ public final class ImageHash {
             }
         }
         if (scaled != source) scaled.recycle();
-        if (body != source) body.recycle();
         return hash;
     }
 

@@ -20,6 +20,7 @@ import android.widget.Toast;
 
 import com.tweak87.aookbscanner.capture.CaptureService;
 import com.tweak87.aookbscanner.ui.ReportsActivity;
+import com.tweak87.aookbscanner.ui.StatusConfigActivity;
 import com.tweak87.aookbscanner.ui.UnitConfigActivity;
 import com.tweak87.aookbscanner.util.Ui;
 
@@ -94,6 +95,9 @@ public final class MainActivity extends Activity {
         Button units = Ui.button(this, "Einheitennamen konfigurieren", Ui.PANEL);
         units.setOnClickListener(view -> startActivity(new Intent(this, UnitConfigActivity.class)));
         page.addView(units);
+        Button statuses = Ui.button(this, "Statuswerte konfigurieren", Ui.PANEL);
+        statuses.setOnClickListener(view -> startActivity(new Intent(this, StatusConfigActivity.class)));
+        page.addView(statuses);
 
         page.addView(Ui.spacer(this, 18));
         TextView help = Ui.text(this,
@@ -104,7 +108,9 @@ public final class MainActivity extends Activity {
                         "Grün = erkannt · Gelb = noch offen · Rot = unplausibel. " +
                         "Im Eventmodus werden die Battle-Frenzy-Punkte live angezeigt. Titan und Kampfflugzeug " +
                         "müssen beim ersten Auftreten in der Einheitenkonfiguration zugeordnet werden. " +
-                        "Die App speichert keine Videoaufnahme und sendet keine Daten ins Internet.",
+                        "Während eines bestätigten Scans werden veränderte Ansichten als markierte Belegbilder " +
+                        "lokal beim Bericht gespeichert; eine Videodatei entsteht nicht. Es werden keine Daten " +
+                        "ins Internet gesendet.",
                 15, Ui.MUTED);
         help.setLineSpacing(Ui.dp(this, 2), 1.12f);
         page.addView(help);

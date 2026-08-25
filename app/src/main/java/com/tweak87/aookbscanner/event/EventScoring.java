@@ -49,6 +49,18 @@ public final class EventScoring {
         return total == 0 ? -1 : total;
     }
 
+    public static String romanTier(int level) {
+        if (level < 1 || level > 13) return "?";
+        String[] values = {"?", "I", "II", "III", "IV", "V", "VI", "VII",
+                "VIII", "IX", "X", "XI", "XII", "XIII"};
+        return values[level];
+    }
+
+    public static String normalizedTier(String raw) {
+        int level = parseTier(raw);
+        return level >= 1 && level <= 13 ? romanTier(level) : "?";
+    }
+
     private static int roman(char value) {
         if (value == 'I') return 1;
         if (value == 'V') return 5;

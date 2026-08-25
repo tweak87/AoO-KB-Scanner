@@ -12,7 +12,10 @@ Android-Prototyp zum lokalen Erfassen von Kampfberichten aus **Age of Origins**.
 - Vergibt IDs im Format `KB-JJJJMMTT-HHMM-XXXXXXXX` und führt alle wiederholten/überlappenden Scroll-Bilder zwischen Start und Ende zusammen.
 - Speichert alles nur lokal. Die App hat absichtlich keine Internet-Berechtigung.
 - Ordnet Einheitensymbole über einen Bild-Fingerabdruck zu. Name und Kategorie können unter „Einheitennamen konfigurieren“ korrigiert werden.
-- Berichte sind formatiert, in die Zwischenablage kopierbar und über Androids Dateiauswahl als mehrseitige PDF speicherbar.
+- Liest die Stufe direkt als römische Zahl am Einheitensymbol und erlaubt eine feste Stufen-Zuordnung, falls OCR sie verfehlt.
+- Namen und OCR-Aliase aller Technologie-/Statuswerte sind konfigurierbar.
+- Speichert während des bestätigten Scans veränderte Ansichten als markierte Belegbilder. Die Scan-Prüfung verbindet sie vertikal zu einem Dokument und erlaubt Korrekturen sowie Ergänzungen einzelner Spieler-, Einheiten- und Statuswerte.
+- Berichte verwenden kopierbare Tabellen und sind über Androids Dateiauswahl samt Scan-Dokument als mehrseitige PDF speicherbar.
 - Optionaler Battle-Frenzy-Modus zeigt Punkte live im Overlay und im fertigen Bericht. Ressourcenfeld-Kämpfe können mit 50 % gewertet werden.
 
 ## Benutzung
@@ -23,7 +26,8 @@ Android-Prototyp zum lokalen Erfassen von Kampfberichten aus **Age of Origins**.
 4. Die Schlachtbericht-Übersicht öffnen und oben rechts „Scan starten“ drücken.
 5. Die Details **jedes Spielers beider Seiten langsam** von oben bis zum Ende der Technologieboni scrollen.
 6. Nach dem letzten Feld „Scan beenden“ drücken. Erst dann wird die eine zusammengeführte Sitzung abgeschlossen.
-7. Gespeicherte Daten stehen in „Erfasste Berichte“ und lassen sich dort kopieren oder als PDF speichern.
+7. Unter „Scan-Dokument prüfen & Werte korrigieren“ fehlende/fehlerhafte Werte kontrollieren und bei Bedarf ergänzen.
+8. Der tabellarische Bericht lässt sich kopieren oder samt markierter Belegbilder als PDF speichern.
 
 ## Battle-Frenzy-Punkte
 
@@ -50,7 +54,7 @@ Auf Huawei/EMUI kann es nötig sein, für den Scanner unter Akku/App-Start den a
 
 ## Datenschutz und Grenzen
 
-Die OCR läuft offline auf dem Gerät. Bildschirmbilder werden nach der Verarbeitung aus dem Arbeitsspeicher freigegeben. Diese Alpha-Version ist zunächst auf die deutsche Oberfläche und das in den Testaufnahmen gezeigte Hochformat optimiert. Spiel-Updates, andere Display-Seitenverhältnisse und OCR-Fehler können Nachkalibrierung erfordern. Die App greift nicht in das Spiel ein und führt keine Klicks aus.
+Die OCR läuft offline auf dem Gerät. Nur zwischen „Scan starten“ und „Scan beenden“ werden maximal 36 deutlich veränderte, komprimierte Belegbilder im privaten App-Speicher abgelegt; sie verlassen das Gerät nicht. Diese Alpha-Version ist zunächst auf die deutsche Oberfläche und das in den Testaufnahmen gezeigte Hochformat optimiert. Spiel-Updates, andere Display-Seitenverhältnisse und OCR-Fehler können Nachkalibrierung erfordern. Die App greift nicht in das Spiel ein und führt keine Klicks aus.
 
 ## Build
 

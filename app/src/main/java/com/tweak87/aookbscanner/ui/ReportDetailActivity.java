@@ -7,8 +7,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.graphics.Typeface;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -26,15 +28,18 @@ public final class ReportDetailActivity extends Activity {
 
     private String reportText;
     private String displayId;
+    private String reportId;
+    private ScannerDatabase database;
+    private TextView reportView;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         setTitle("Berichtsdetails");
-        String id = getIntent().getStringExtra(EXTRA_REPORT_ID);
-        ScannerDatabase database = new ScannerDatabase(this);
-        reportText = id == null ? "Bericht nicht gefunden." : database.reportDetails(id);
-        displayId = id == null ? "unbekannt" : database.reportDisplayId(id);
+        reportId = getIntent().getStringExtra(EXTRA_REPORT_ID);
+        database = new ScannerDatabase(this);
+        reportText = reportId == null ? "Bericht nicht gefunden." : database.reportDetails(reportId);
+        displayId = reportId == null ? "unbekannt" : database.reportDisplayId(reportId);
 
         LinearLayout page = Ui.verticalPage(this);
         page.addView(Ui.backHeader(this, "Kampfbericht"));
@@ -54,17 +59,40 @@ public final class ReportDetailActivity extends Activity {
         page.addView(actions, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView text = Ui.text(this, reportText, 14, Ui.WHITE);
-        text.setTextIsSelectable(true);
-        text.setPadding(Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 22));
-        text.setBackground(Ui.rounded(Ui.PANEL, Ui.dp(this, 12), 0, 0));
-        page.addView(text, new LinearLayout.LayoutParams(
+        Button review = Ui.button(this, "Scan-Dokument prüfen & Werte korrigieren", Ui.AMBER);
+        review.setTextColor(Ui.NAVY);
+        review.setOnClickListener(view -> {
+            Intent intent = new Intent(this, ReportReviewActivity.class);
+            intent.putExtra(ReportReviewActivity.EXTRA_REPORT_ID, reportId);
+            startActivity(intent);
+        });
+        Ui.setEnabled(review, reportId != null);
+        page.addView(review);
+
+        reportView = Ui.text(this, reportText, 13, Ui.WHITE);
+        reportView.setTypeface(Typeface.MONOSPACE);
+        reportView.setTextIsSelectable(true);
+        reportView.setPadding(Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 22));
+        reportView.setBackground(Ui.rounded(Ui.PANEL, Ui.dp(this, 12), 0, 0));
+        HorizontalScrollView tableScroll = new HorizontalScrollView(this);
+        tableScroll.setFillViewport(true);
+        tableScroll.addView(reportView, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(tableScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(page);
         setContentView(scroll);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (database != null && reportId != null && reportView != null) {
+            reportText = database.reportDetails(reportId);
+            reportView.setText(reportText);
+        }
     }
 
     private void copyReport() {
@@ -89,7 +117,7 @@ public final class ReportDetailActivity extends Activity {
         if (destination == null) return;
         try (OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
             if (output == null) throw new IOException("Zieldatei konnte nicht geöffnet werden");
-            ReportPdfExporter.write(reportText, displayId, output);
+            ReportPdfExporter.write(reportText, displayId, database.listEvidence(reportId), output);
             Toast.makeText(this, "PDF wurde gespeichert.", Toast.LENGTH_LONG).show();
         } catch (IOException error) {
             Toast.makeText(this, "PDF konnte nicht gespeichert werden: " + error.getMessage(),

@@ -71,6 +71,7 @@ public final class CaptureService extends Service {
     private OverlayController overlay;
     private OcrParser parser;
     private ReportAssembler assembler;
+    private EvidenceStore evidenceStore;
     private int captureWidth;
     private int captureHeight;
     private long lastFrameAt;
@@ -90,8 +91,10 @@ public final class CaptureService extends Service {
         createNotificationChannel();
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         overlay = new OverlayController(this);
-        parser = new OcrParser();
-        assembler = new ReportAssembler(new ScannerDatabase(this));
+        ScannerDatabase database = new ScannerDatabase(this);
+        parser = new OcrParser(database.statusAliasMap());
+        assembler = new ReportAssembler(database);
+        evidenceStore = new EvidenceStore(this, database);
         captureThread = new HandlerThread("AoO-screen-capture");
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
@@ -147,7 +150,7 @@ public final class CaptureService extends Service {
         imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
         isRunning = true;
         overlay.show();
-        notifyStatus("Scanner aktiv · OCR lokal auf dem Gerät");
+        notifyStatus("STATUS: Scanner aktiv");
     }
 
     private void onImageAvailable(ImageReader reader) {
@@ -173,6 +176,11 @@ public final class CaptureService extends Service {
                 .addOnSuccessListener(analysisExecutor, text -> {
                     ParsedFrame parsed = parser.parse(text, bitmap);
                     AnalysisResult result = handleParsedFrame(parsed);
+                    if (scanState == ScanState.SCANNING && assembler.currentReportId() != null &&
+                            (parsed.screenType == ScreenType.BATTLE_SUMMARY ||
+                                    parsed.screenType == ScreenType.ARMY_INFO)) {
+                        evidenceStore.capture(bitmap, parsed, result);
+                    }
                     overlay.update(result, bitmap.getWidth(), bitmap.getHeight());
                     notifyStatus(result.status.replace('\n', ' '));
                 })
@@ -189,13 +197,17 @@ public final class CaptureService extends Service {
                 pendingHeader = frame;
                 scanState = ScanState.READY;
                 overlay.showControl("Scan starten", () -> analysisExecutor.execute(this::beginScanSession));
-                String mode = eventMode ? "\nBattle Frenzy" + (resourceField ? " · Ressourcenfeld" : "") : "";
-                return new AnalysisResult(frame.boxes, "Bericht erkannt · Scan starten" + mode, BoxState.VALID);
+                String mode = eventMode ? (resourceField ? "BF / 50 %" : "Battle Frenzy") : "Standard";
+                return new AnalysisResult(frame.boxes,
+                        "STATUS | BERICHT ERKANNT\nAKTION | SCAN STARTEN\nMODUS  | " + mode,
+                        BoxState.VALID);
             }
             if (frame.screenType == ScreenType.MESSAGE_LIST) {
-                return new AnalysisResult(frame.boxes, "Nachrichten erkannt · Bericht öffnen", BoxState.PENDING);
+                return new AnalysisResult(frame.boxes,
+                        "STATUS | NACHRICHTEN\nAKTION | BERICHT ÖFFNEN", BoxState.PENDING);
             }
-            return new AnalysisResult(frame.boxes, "Scanner aktiv · wartet auf Bericht", BoxState.PENDING);
+            return new AnalysisResult(frame.boxes,
+                    "STATUS | SCANNER AKTIV\nAKTION | WARTE AUF BERICHT", BoxState.PENDING);
         }
 
         if (scanState == ScanState.READY) {
@@ -204,9 +216,11 @@ public final class CaptureService extends Service {
                 pendingHeader = null;
                 scanState = ScanState.WAITING;
                 overlay.hideControl();
-                return new AnalysisResult(frame.boxes, "Scan verworfen · Bericht öffnen", BoxState.PENDING);
+                return new AnalysisResult(frame.boxes,
+                        "STATUS | SCAN VERWORFEN\nAKTION | BERICHT ÖFFNEN", BoxState.PENDING);
             }
-            return new AnalysisResult(frame.boxes, "Bericht erkannt · Scan starten", BoxState.VALID);
+            return new AnalysisResult(frame.boxes,
+                    "STATUS | BERICHT ERKANNT\nAKTION | SCAN STARTEN", BoxState.VALID);
         }
 
         if (scanState == ScanState.SCANNING) return assembler.acceptFrame(frame);
@@ -216,30 +230,34 @@ public final class CaptureService extends Service {
         if (outsideReportFrames >= 2) {
             scanState = ScanState.WAITING;
             outsideReportFrames = 0;
-            return new AnalysisResult(frame.boxes, "Scanner aktiv · wartet auf Bericht", BoxState.PENDING);
+            return new AnalysisResult(frame.boxes,
+                    "STATUS | SCANNER AKTIV\nAKTION | WARTE AUF BERICHT", BoxState.PENDING);
         }
-        return new AnalysisResult(new ArrayList<>(), finishedStatus + "\nZur Nachrichtenliste zurück", BoxState.VALID);
+        return new AnalysisResult(new ArrayList<>(), finishedStatus +
+                "\nAKTION | ZUR NACHRICHTENLISTE", BoxState.VALID);
     }
 
     private synchronized void beginScanSession() {
         if (scanState != ScanState.READY || pendingHeader == null) return;
         AnalysisResult result = assembler.startSession(pendingHeader, eventMode, resourceField);
+        evidenceStore.begin(assembler.currentReportId());
         pendingHeader = null;
         scanState = ScanState.SCANNING;
         overlay.showControl("Scan beenden", () -> analysisExecutor.execute(this::finishScanSession));
         overlay.update(result, captureWidth, captureHeight);
-        notifyStatus("Berichtsscan läuft");
+        notifyStatus("STATUS: Berichtsscan läuft");
     }
 
     private synchronized void finishScanSession() {
         if (scanState != ScanState.SCANNING) return;
         AnalysisResult result = assembler.finishSession();
+        evidenceStore.finish();
         finishedStatus = result.status;
         scanState = ScanState.WAIT_FOR_EXIT;
         outsideReportFrames = 0;
         overlay.hideControl();
         overlay.update(result, captureWidth, captureHeight);
-        notifyStatus("Bericht gespeichert");
+        notifyStatus("STATUS: Bericht gespeichert");
     }
 
     private Bitmap imageToBitmap(Image image, int width, int height) {

@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.view.View;
 
 import com.tweak87.aookbscanner.model.Models.AnalysisResult;
@@ -34,6 +35,7 @@ public final class ScannerOverlayView extends View {
         label.setColor(Color.WHITE);
         label.setTextSize(dp(13));
         label.setFakeBoldText(true);
+        label.setTypeface(Typeface.MONOSPACE);
     }
 
     public void update(AnalysisResult result, int width, int height) {
@@ -67,7 +69,7 @@ public final class ScannerOverlayView extends View {
         String[] lines = status.split("\\n", -1);
         float textWidth = 0;
         for (String line : lines) textWidth = Math.max(textWidth, label.measureText(line));
-        float height = dp(lines.length > 1 ? 54 : 34);
+        float height = dp(15 + lines.length * 19);
         float right = getWidth() - dp(8);
         float left = Math.max(dp(8), right - Math.min(textWidth, getWidth() - dp(36)) - padding * 2);
         float top = dp(8);

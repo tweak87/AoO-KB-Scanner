@@ -20,6 +20,12 @@
         android:theme="@style/AppTheme">
 
         <activity
+            android:name=".ui.ReportReviewActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.StatusConfigActivity"
+            android:exported="false" />
+        <activity
             android:name=".ui.UnitConfigActivity"
             android:exported="false" />
         <activity

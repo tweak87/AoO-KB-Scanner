@@ -22,4 +22,10 @@ public final class EventScoringTest {
         assertEquals(390, EventScoring.resourceFieldAdjustment(780, true));
         assertEquals(3, EventScoring.resourceFieldAdjustment(7, true));
     }
+
+    @Test public void normalizesRomanTierConfiguration() {
+        assertEquals("XIII", EventScoring.normalizedTier("T XIII"));
+        assertEquals("IX", EventScoring.normalizedTier("9"));
+        assertEquals("?", EventScoring.normalizedTier("unbekannt"));
+    }
 }

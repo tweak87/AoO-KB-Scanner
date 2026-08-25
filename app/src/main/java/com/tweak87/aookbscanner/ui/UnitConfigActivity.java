@@ -31,6 +31,10 @@ public final class UnitConfigActivity extends Activity {
             EventScoring.TYPE_STANDARD, EventScoring.TYPE_TITAN,
             EventScoring.TYPE_WARPLANE, EventScoring.TYPE_NONE
     };
+    private static final String[] TIER_LABELS = {
+            "? (noch nicht erkannt)", "I", "II", "III", "IV", "V", "VI", "VII",
+            "VIII", "IX", "X", "XI", "XII", "XIII"
+    };
     private ScannerDatabase database;
     private LinearLayout content;
 
@@ -55,7 +59,8 @@ public final class UnitConfigActivity extends Activity {
         content.addView(Ui.backHeader(this, "Einheiten konfigurieren"));
         content.addView(Ui.text(this,
                 "Tippe auf eine Einheit, um Namen, Kategorie und die Battle-Frenzy-Zuordnung zu korrigieren. " +
-                        "Die Zuordnung gilt danach automatisch für gleiche Symbole.", 15, Ui.MUTED));
+                        "Auch die römische Stufe kann fest zugeordnet werden; sie gilt danach automatisch für " +
+                        "gleiche Symbole.", 15, Ui.MUTED));
         content.addView(Ui.spacer(this, 12));
         List<UnitTypeRow> rows = database.listUnitTypes();
         if (rows.isEmpty()) {
@@ -85,7 +90,8 @@ public final class UnitConfigActivity extends Activity {
         line.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 64), Ui.dp(this, 64)));
 
         TextView labels = Ui.text(this, row.displayName + "\n" + row.category +
-                " · " + eventLabel(row.eventType) + "\n" + row.signature, 15, Ui.WHITE);
+                " · Stufe " + row.defaultTier + " · " + eventLabel(row.eventType) +
+                "\n" + row.signature, 15, Ui.WHITE);
         labels.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -107,6 +113,13 @@ public final class UnitConfigActivity extends Activity {
         category.setHint("Kategorie, z. B. Fernkampf");
         category.setText(row.category);
         form.addView(category);
+        TextView tierTitle = Ui.text(this, "Stufe auf dem Einheitensymbol", 14, Ui.MUTED);
+        tierTitle.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 4));
+        form.addView(tierTitle);
+        Spinner tier = new Spinner(this);
+        tier.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, TIER_LABELS));
+        tier.setSelection(tierIndex(row.defaultTier));
+        form.addView(tier);
         TextView eventTitle = Ui.text(this, "Battle-Frenzy-Zuordnung", 14, Ui.MUTED);
         eventTitle.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 4));
         form.addView(eventTitle);
@@ -122,7 +135,8 @@ public final class UnitConfigActivity extends Activity {
                 .setNegativeButton("Abbrechen", null)
                 .setPositiveButton("Speichern", (dialog, which) -> {
                     database.updateUnitType(row.signature, name.getText().toString(),
-                            category.getText().toString(), EVENT_TYPES[eventType.getSelectedItemPosition()]);
+                            category.getText().toString(), EVENT_TYPES[eventType.getSelectedItemPosition()],
+                            tier.getSelectedItemPosition() == 0 ? "?" : TIER_LABELS[tier.getSelectedItemPosition()]);
                     reload();
                 })
                 .show();
@@ -135,5 +149,11 @@ public final class UnitConfigActivity extends Activity {
 
     private String eventLabel(String type) {
         return EVENT_LABELS[eventTypeIndex(type)];
+    }
+
+    private int tierIndex(String tier) {
+        if (tier == null || "?".equals(tier)) return 0;
+        for (int i = 1; i < TIER_LABELS.length; i++) if (TIER_LABELS[i].equals(tier)) return i;
+        return 0;
     }
 }

@@ -1,6 +1,8 @@
 package com.tweak87.aookbscanner.ocr;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
 import java.util.List;
 
 /** Canonical German labels used to merge slightly different OCR readings of one status field. */
@@ -54,6 +56,25 @@ public final class BonusCatalog {
     public static String canonicalize(String raw) {
         String known = matchKnown(raw);
         return known == null ? (raw == null ? "" : raw.trim()) : known;
+    }
+
+    public static List<String> labels() {
+        return Collections.unmodifiableList(LABELS);
+    }
+
+    public static String matchKnown(String raw, Map<String, String> configuredAliases) {
+        String normalized = TextNormalization.normalize(raw);
+        if (configuredAliases != null) {
+            String exact = configuredAliases.get(normalized);
+            if (exact != null) return exact;
+            String compactCandidate = compact(raw);
+            for (Map.Entry<String, String> alias : configuredAliases.entrySet()) {
+                String compactAlias = compact(alias.getKey());
+                if (!compactAlias.isEmpty() && (compactCandidate.contains(compactAlias) ||
+                        compactAlias.contains(compactCandidate))) return alias.getValue();
+            }
+        }
+        return matchKnown(raw);
     }
 
     public static String matchKnown(String raw) {

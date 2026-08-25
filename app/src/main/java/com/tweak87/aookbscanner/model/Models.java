@@ -64,6 +64,7 @@ public final class Models {
 
     public static final class UnitFrame {
         public long iconHash;
+        public long tierBadgeHash;
         public Bitmap icon;
         public String tier = "?";
         public Long survivors;

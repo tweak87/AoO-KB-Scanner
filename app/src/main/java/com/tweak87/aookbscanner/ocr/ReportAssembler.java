@@ -74,8 +74,13 @@ public final class ReportAssembler {
         database.finalizeReport(currentReportId);
         Progress progress = database.getProgress(currentReportId);
         EventPoints points = database.getEventPoints(currentReportId);
-        String message = "Gespeichert · " + display + "\n" + progress.label();
-        if (points.eventMode) message += " · " + points.overlayLabel();
+        String message = "STATUS | " + (progress.complete ? "VOLLSTÄNDIG" : "UNVOLLSTÄNDIG") +
+                "\nID     | " + display +
+                "\nANGR.  | " + progress.completeAttackers + "/" +
+                (progress.expectedAttackers > 0 ? progress.expectedAttackers : "?") +
+                "   VER. | " + progress.completeDefenders + "/" +
+                (progress.expectedDefenders > 0 ? progress.expectedDefenders : "?");
+        if (points.eventMode) message += "\n" + points.overlayLabel();
         currentReportId = null;
         currentDisplayId = null;
         activeParticipants.clear();
@@ -84,6 +89,7 @@ public final class ReportAssembler {
     }
 
     public synchronized boolean isSessionActive() { return currentReportId != null; }
+    public synchronized String currentReportId() { return currentReportId; }
 
     private AnalysisResult status(List<com.tweak87.aookbscanner.model.Models.OverlayBox> boxes) {
         Progress progress = database.getProgress(currentReportId);
@@ -118,7 +124,8 @@ public final class ReportAssembler {
                 UnitFrame unit = event.unit;
                 try {
                     if (active >= 0) {
-                        String signature = database.ensureUnitType(unit.iconHash, png(unit.icon), unit.tier);
+                        String signature = database.ensureUnitType(unit.iconHash, unit.tierBadgeHash,
+                                png(unit.icon), unit.tier);
                         database.upsertUnit(active, signature, unit);
                         database.markProgress(active, true, false, false);
                     }

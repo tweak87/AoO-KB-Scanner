@@ -32,12 +32,15 @@ public final class OcrParser {
     private static final Pattern PLAYER = Pattern.compile("^\\s*\\(([^)#]+)\\)\\s*(.+?)\\s*$");
     private static final Pattern COORDINATE = Pattern.compile("(?i)X\\s*[:;]?\\s*(\\d+)\\s*[, .-]*Y\\s*[:;]?\\s*(\\d+)");
     private static final Pattern BATTLE_TIME = Pattern.compile("(\\d{2})[-.](\\d{2})\\s+(\\d{2}):(\\d{2})");
-    private static final Pattern TIER = Pattern.compile("^(?:XII|XI|X|IX|VIII|VII|VI|V|IV|III|II|I|[1-9]|[12]\\d|30)$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TIER = Pattern.compile(
+            "^(?:XIII|XII|XI|X|IX|VIII|VII|VI|V|IV|III|II|I)$",
+            Pattern.CASE_INSENSITIVE);
 
     private static final Map<String, String> SUMMARY_LABELS = new HashMap<>();
     private static final Set<String> BONUS_MARKERS = new HashSet<>(Arrays.asList(
             "leben", "angriff", "verteidigung", "schaden", "blocken", "resistenz",
             "verringert", "verringerung", "zusatzsteigerung", "zusatzerhohung", "titanschaden"));
+    private final Map<String, String> configuredStatusAliases;
 
     static {
         SUMMARY_LABELS.put("insgesamt", "total");
@@ -46,6 +49,15 @@ public final class OcrParser {
         SUMMARY_LABELS.put("gefallene", "fallen");
         SUMMARY_LABELS.put("uberlebende", "survivors");
         SUMMARY_LABELS.put("verwundete", "wounded");
+    }
+
+    public OcrParser() {
+        this(Collections.emptyMap());
+    }
+
+    public OcrParser(Map<String, String> configuredStatusAliases) {
+        this.configuredStatusAliases = configuredStatusAliases == null
+                ? Collections.emptyMap() : configuredStatusAliases;
     }
 
     public ParsedFrame parse(Text result, Bitmap frame) {
@@ -268,6 +280,12 @@ public final class OcrParser {
             try {
                 unit.icon = Bitmap.createBitmap(frame, iconBounds.left, iconBounds.top, iconBounds.width(), iconBounds.height());
                 unit.iconHash = ImageHash.differenceHash(unit.icon);
+                int badgeLeft = Math.max(0, Math.round(unit.icon.getWidth() * 0.58f));
+                int badgeTop = Math.max(0, Math.round(unit.icon.getHeight() * 0.52f));
+                Bitmap badge = Bitmap.createBitmap(unit.icon, badgeLeft, badgeTop,
+                        unit.icon.getWidth() - badgeLeft, unit.icon.getHeight() - badgeTop);
+                unit.tierBadgeHash = ImageHash.differenceHashFull(badge);
+                badge.recycle();
             } catch (IllegalArgumentException ignored) {
                 continue;
             }
@@ -288,7 +306,7 @@ public final class OcrParser {
             if (rawValue == null || (!rawValue.contains("%") && !containsBonusMarker(normalized))) continue;
             int valueAt = line.text.lastIndexOf(rawValue);
             String rawLabel = valueAt > 0 ? line.text.substring(0, valueAt).trim() : "";
-            String knownLabel = BonusCatalog.matchKnown(rawLabel);
+            String knownLabel = BonusCatalog.matchKnown(rawLabel, configuredStatusAliases);
             // A line spanning both columns mixes two cells; the spatial pass below separates it.
             if (knownLabel == null && line.bounds.width() > width * 0.52f) continue;
             String label = knownLabel == null ? BonusCatalog.canonicalize(rawLabel) : knownLabel;
@@ -302,10 +320,13 @@ public final class OcrParser {
         int headerY = findTextY(lines, "technologiebonus", height + 1);
         int tolerance = Math.max(12, Math.round(width * 0.030f));
         if (headerY < height) {
+            Set<String> visitedCells = new HashSet<>();
             for (OcrItem value : elements) {
                 if (!isBonusValue(value.text) || value.centerY() <= headerY ||
                         value.centerY() > height * 0.87f || value.centerX() < width * 0.24f) continue;
                 boolean leftHalf = value.centerX() < width / 2;
+                String cellKey = (leftHalf ? "L" : "R") + (value.centerY() / Math.max(1, tolerance));
+                if (!visitedCells.add(cellKey)) continue;
                 int cellLeft = Math.round(width * (leftHalf ? 0.05f : 0.50f));
                 int cellRight = Math.round(width * (leftHalf ? 0.50f : 0.96f));
                 List<OcrItem> values = new ArrayList<>();
@@ -329,17 +350,25 @@ public final class OcrParser {
                             normalized.equals("verteidiger") || normalized.equals("armee info")) continue;
                     labels.add(candidate);
                 }
-                if (labels.isEmpty()) continue;
+                if (labels.isEmpty()) {
+                    Rect valueBounds = new Rect(values.get(0).bounds);
+                    for (OcrItem item : values) valueBounds.union(item.bounds);
+                    parsed.boxes.add(new OverlayBox(valueBounds, BoxState.PENDING));
+                    continue;
+                }
                 labels.sort(Comparator.comparingInt(OcrItem::centerY).thenComparingInt(OcrItem::centerX));
                 StringBuilder rawLabel = new StringBuilder();
                 for (OcrItem label : labels) rawLabel.append(label.text).append(' ');
-                String canonical = BonusCatalog.matchKnown(rawLabel.toString());
-                if (canonical == null) continue;
-                StringBuilder rawValue = new StringBuilder();
-                for (OcrItem item : values) rawValue.append(item.text).append(' ');
+                String canonical = BonusCatalog.matchKnown(rawLabel.toString(), configuredStatusAliases);
                 Rect bounds = new Rect(labels.get(0).bounds);
                 for (OcrItem item : labels) bounds.union(item.bounds);
                 for (OcrItem item : values) bounds.union(item.bounds);
+                if (canonical == null) {
+                    parsed.boxes.add(new OverlayBox(bounds, BoxState.PENDING));
+                    continue;
+                }
+                StringBuilder rawValue = new StringBuilder();
+                for (OcrItem item : values) rawValue.append(item.text).append(' ');
                 putBonus(bonuses, canonical, rawValue.toString().trim(), bounds, value.centerY());
             }
         }
@@ -500,8 +529,13 @@ public final class OcrParser {
         String best = "?";
         for (OcrItem element : elements) {
             if (Math.abs(element.centerY() - centerY) > tolerance || element.centerX() > icon.right + icon.width() / 3) continue;
-            String candidate = element.text.toUpperCase(Locale.ROOT).replaceAll("[^IVX0-9]", "");
-            if (TIER.matcher(candidate).matches()) best = candidate;
+            String candidate = element.text.toUpperCase(Locale.ROOT)
+                    .replace('L', 'I').replace('1', 'I').replace('|', 'I').replace('!', 'I')
+                    .replaceAll("[^IVX]", "");
+            int tier = com.tweak87.aookbscanner.event.EventScoring.parseTier(candidate);
+            if (TIER.matcher(candidate).matches() && tier >= 1 && tier <= 13) {
+                best = com.tweak87.aookbscanner.event.EventScoring.romanTier(tier);
+            }
         }
         return best;
     }

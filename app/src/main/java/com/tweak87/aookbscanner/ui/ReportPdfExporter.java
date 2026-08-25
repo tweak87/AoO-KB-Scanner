@@ -2,16 +2,21 @@ package com.tweak87.aookbscanner.ui;
 
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.pdf.PdfDocument;
+
+import com.tweak87.aookbscanner.db.ScannerDatabase.EvidenceFrameRow;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Small dependency-free A4 PDF renderer for the plain-text report. */
+/** Dependency-free A4 renderer for the tables plus the annotated scan document. */
 public final class ReportPdfExporter {
     private static final int PAGE_WIDTH = 595;
     private static final int PAGE_HEIGHT = 842;
@@ -22,12 +27,15 @@ public final class ReportPdfExporter {
 
     private ReportPdfExporter() {}
 
-    public static void write(String report, String displayId, OutputStream output) throws IOException {
+    public static void write(String report, String displayId, List<EvidenceFrameRow> evidence,
+                             OutputStream output) throws IOException {
         PdfDocument document = new PdfDocument();
         Paint title = paint(16f, true, Color.rgb(16, 53, 88));
-        Paint body = paint(9.5f, false, Color.BLACK);
+        Paint body = paint(7.3f, false, Color.BLACK);
         Paint footer = paint(8f, false, Color.DKGRAY);
-        float lineHeight = 13.5f;
+        Paint caption = paint(9f, true, Color.rgb(16, 53, 88));
+        body.setTypeface(Typeface.MONOSPACE);
+        float lineHeight = 10.5f;
 
         PdfDocument.Page page = null;
         Canvas canvas = null;
@@ -65,6 +73,37 @@ public final class ReportPdfExporter {
             }
             drawFooter(canvas, footer, pageNumber);
             document.finishPage(page);
+
+            if (evidence != null) {
+                for (EvidenceFrameRow frame : evidence) {
+                    Bitmap bitmap = BitmapFactory.decodeFile(frame.filePath);
+                    if (bitmap == null) continue;
+                    pageNumber++;
+                    PdfDocument.Page evidencePage = document.startPage(new PdfDocument.PageInfo.Builder(
+                            PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create());
+                    Canvas evidenceCanvas = evidencePage.getCanvas();
+                    evidenceCanvas.drawColor(Color.WHITE);
+                    evidenceCanvas.drawText("Scan-Dokument · " +
+                            (displayId == null ? "Kampfbericht" : displayId), LEFT, 29f, title);
+                    String[] captionLines = frame.label().split("\\n", -1);
+                    for (int i = 0; i < captionLines.length; i++) {
+                        evidenceCanvas.drawText(captionLines[i], LEFT, 45f + i * 12f, caption);
+                    }
+                    float availableWidth = PAGE_WIDTH - LEFT - RIGHT;
+                    float imageTop = 54f + captionLines.length * 12f;
+                    float availableHeight = PAGE_HEIGHT - imageTop - BOTTOM;
+                    float scale = Math.min(availableWidth / bitmap.getWidth(),
+                            availableHeight / bitmap.getHeight());
+                    float width = bitmap.getWidth() * scale;
+                    float height = bitmap.getHeight() * scale;
+                    float left = (PAGE_WIDTH - width) / 2f;
+                    RectF destination = new RectF(left, imageTop, left + width, imageTop + height);
+                    evidenceCanvas.drawBitmap(bitmap, null, destination, null);
+                    bitmap.recycle();
+                    drawFooter(evidenceCanvas, footer, pageNumber);
+                    document.finishPage(evidencePage);
+                }
+            }
             document.writeTo(output);
         } finally {
             document.close();
