@@ -6,11 +6,11 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.pdf.PdfDocument;
 
-import com.tweak87.aookbscanner.db.ScannerDatabase.EvidenceFrameRow;
-
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
@@ -27,7 +27,7 @@ public final class ReportPdfExporter {
 
     private ReportPdfExporter() {}
 
-    public static void write(String report, String displayId, List<EvidenceFrameRow> evidence,
+    public static void write(String report, String displayId, File collage,
                              OutputStream output) throws IOException {
         PdfDocument document = new PdfDocument();
         Paint title = paint(16f, true, Color.rgb(16, 53, 88));
@@ -74,34 +74,40 @@ public final class ReportPdfExporter {
             drawFooter(canvas, footer, pageNumber);
             document.finishPage(page);
 
-            if (evidence != null) {
-                for (EvidenceFrameRow frame : evidence) {
-                    Bitmap bitmap = BitmapFactory.decodeFile(frame.filePath);
-                    if (bitmap == null) continue;
+            if (collage != null && collage.isFile()) {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inPreferredConfig = Bitmap.Config.RGB_565;
+                Bitmap bitmap = BitmapFactory.decodeFile(collage.getAbsolutePath(), options);
+                if (bitmap != null) {
+                    float availableWidth = PAGE_WIDTH - LEFT - RIGHT;
+                    float imageTop = 58f;
+                    float availableHeight = PAGE_HEIGHT - imageTop - BOTTOM;
+                    float scale = availableWidth / bitmap.getWidth();
+                    int sourceHeight = Math.max(1, (int) Math.floor(availableHeight / scale));
+                    int sourceTop = 0;
+                    int part = 1;
+                    while (sourceTop < bitmap.getHeight()) {
+                        int sourceBottom = Math.min(bitmap.getHeight(), sourceTop + sourceHeight);
                     pageNumber++;
                     PdfDocument.Page evidencePage = document.startPage(new PdfDocument.PageInfo.Builder(
                             PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create());
                     Canvas evidenceCanvas = evidencePage.getCanvas();
                     evidenceCanvas.drawColor(Color.WHITE);
-                    evidenceCanvas.drawText("Scan-Dokument · " +
+                        evidenceCanvas.drawText("Zusammenhängendes Scan-Dokument · " +
                             (displayId == null ? "Kampfbericht" : displayId), LEFT, 29f, title);
-                    String[] captionLines = frame.label().split("\\n", -1);
-                    for (int i = 0; i < captionLines.length; i++) {
-                        evidenceCanvas.drawText(captionLines[i], LEFT, 45f + i * 12f, caption);
-                    }
-                    float availableWidth = PAGE_WIDTH - LEFT - RIGHT;
-                    float imageTop = 54f + captionLines.length * 12f;
-                    float availableHeight = PAGE_HEIGHT - imageTop - BOTTOM;
-                    float scale = Math.min(availableWidth / bitmap.getWidth(),
-                            availableHeight / bitmap.getHeight());
-                    float width = bitmap.getWidth() * scale;
-                    float height = bitmap.getHeight() * scale;
-                    float left = (PAGE_WIDTH - width) / 2f;
-                    RectF destination = new RectF(left, imageTop, left + width, imageTop + height);
-                    evidenceCanvas.drawBitmap(bitmap, null, destination, null);
-                    bitmap.recycle();
+                        evidenceCanvas.drawText("Teil " + part + " · Grün = sicher · Gelb = prüfen · Rot = fehlt",
+                                LEFT, 45f, caption);
+                        float drawnHeight = (sourceBottom - sourceTop) * scale;
+                        Rect source = new Rect(0, sourceTop, bitmap.getWidth(), sourceBottom);
+                        RectF destination = new RectF(LEFT, imageTop,
+                                LEFT + availableWidth, imageTop + drawnHeight);
+                        evidenceCanvas.drawBitmap(bitmap, source, destination, null);
                     drawFooter(evidenceCanvas, footer, pageNumber);
                     document.finishPage(evidencePage);
+                        sourceTop = sourceBottom;
+                        part++;
+                    }
+                    bitmap.recycle();
                 }
             }
             document.writeTo(output);

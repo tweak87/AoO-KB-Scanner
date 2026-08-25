@@ -8,25 +8,30 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 import com.tweak87.aookbscanner.event.EventScoring;
 import com.tweak87.aookbscanner.model.Models.ParticipantFrame;
+import com.tweak87.aookbscanner.model.Models.BoxState;
+import com.tweak87.aookbscanner.model.Models.OverlayBox;
 import com.tweak87.aookbscanner.model.Models.Side;
 import com.tweak87.aookbscanner.model.Models.UnitFrame;
 import com.tweak87.aookbscanner.ocr.BonusCatalog;
 import com.tweak87.aookbscanner.ocr.NumberParser;
 import com.tweak87.aookbscanner.ocr.TextNormalization;
+import com.tweak87.aookbscanner.review.FieldKeys;
 
 import java.text.DateFormat;
 import java.text.NumberFormat;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.UUID;
 
 public final class ScannerDatabase extends SQLiteOpenHelper {
     private static final String DB_NAME = "aoo_scanner.db";
-    private static final int DB_VERSION = 3;
+    private static final int DB_VERSION = 4;
 
     public ScannerDatabase(Context context) {
         super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -105,6 +110,7 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
                 "UNIQUE(participant_id, label_key))");
         db.execSQL("CREATE INDEX idx_participants_report ON participants(report_id, side)");
         createVersionThreeTables(db);
+        createVersionFourTables(db);
         seedStatusTypes(db);
     }
 
@@ -123,6 +129,7 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
             createVersionThreeTables(db);
             seedStatusTypes(db);
         }
+        if (oldVersion < 4) createVersionFourTables(db);
     }
 
     private void createVersionThreeTables(SQLiteDatabase db) {
@@ -146,6 +153,23 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
                 "created_at INTEGER NOT NULL," +
                 "UNIQUE(report_id, sequence))");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_evidence_report ON evidence_frames(report_id, sequence)");
+    }
+
+    private void createVersionFourTables(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS evidence_boxes (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "evidence_id INTEGER NOT NULL REFERENCES evidence_frames(id) ON DELETE CASCADE," +
+                "left_n REAL NOT NULL," +
+                "top_n REAL NOT NULL," +
+                "right_n REAL NOT NULL," +
+                "bottom_n REAL NOT NULL," +
+                "field_key TEXT," +
+                "label TEXT," +
+                "candidate_value TEXT," +
+                "confidence REAL NOT NULL DEFAULT 0," +
+                "original_state TEXT NOT NULL)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_evidence_boxes_frame ON evidence_boxes(evidence_id)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_evidence_boxes_key ON evidence_boxes(field_key)");
     }
 
     private void seedStatusTypes(SQLiteDatabase db) {
@@ -457,7 +481,7 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
         return count("SELECT COUNT(*) FROM evidence_frames WHERE report_id=?", reportId);
     }
 
-    public synchronized void insertEvidenceFrame(String reportId, int sequence, String path,
+    public synchronized long insertEvidenceFrame(String reportId, int sequence, String path,
                                                   String screenType, String side,
                                                   int recognized, int pending, int invalid) {
         ContentValues values = new ContentValues();
@@ -470,8 +494,44 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
         values.put("pending_count", pending);
         values.put("invalid_count", invalid);
         values.put("created_at", System.currentTimeMillis());
-        getWritableDatabase().insertWithOnConflict("evidence_frames", null, values,
+        SQLiteDatabase db = getWritableDatabase();
+        long id = db.insertWithOnConflict("evidence_frames", null, values,
                 SQLiteDatabase.CONFLICT_IGNORE);
+        if (id >= 0) return id;
+        try (Cursor cursor = db.query("evidence_frames", new String[]{"id"},
+                "report_id=? AND sequence=?", new String[]{reportId, Integer.toString(sequence)},
+                null, null, null, "1")) {
+            return cursor.moveToFirst() ? cursor.getLong(0) : -1;
+        }
+    }
+
+    public synchronized void insertEvidenceBoxes(long evidenceId, List<OverlayBox> boxes,
+                                                  int sourceWidth, int sourceHeight) {
+        if (evidenceId < 0 || boxes == null || sourceWidth <= 0 || sourceHeight <= 0) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.delete("evidence_boxes", "evidence_id=?", new String[]{Long.toString(evidenceId)});
+            for (OverlayBox box : boxes) {
+                if (box == null || box.bounds == null || box.bounds.isEmpty()) continue;
+                ContentValues values = new ContentValues();
+                values.put("evidence_id", evidenceId);
+                values.put("left_n", clamp01(box.bounds.left / (double) sourceWidth));
+                values.put("top_n", clamp01(box.bounds.top / (double) sourceHeight));
+                values.put("right_n", clamp01(box.bounds.right / (double) sourceWidth));
+                values.put("bottom_n", clamp01(box.bounds.bottom / (double) sourceHeight));
+                if (box.fieldKey == null) values.putNull("field_key"); else values.put("field_key", box.fieldKey);
+                if (box.label == null) values.putNull("label"); else values.put("label", box.label);
+                if (box.candidateValue == null) values.putNull("candidate_value");
+                else values.put("candidate_value", box.candidateValue);
+                values.put("confidence", box.confidence);
+                values.put("original_state", box.state.name());
+                db.insertOrThrow("evidence_boxes", null, values);
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
     }
 
     public synchronized List<EvidenceFrameRow> listEvidence(String reportId) {
@@ -485,6 +545,143 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
                     cursor.getInt(6), cursor.getInt(7)));
         }
         return rows;
+    }
+
+    public synchronized List<EvidenceBoxRow> listEvidenceBoxes(long evidenceId) {
+        List<EvidenceBoxRow> rows = new ArrayList<>();
+        try (Cursor cursor = getReadableDatabase().query("evidence_boxes",
+                new String[]{"id", "left_n", "top_n", "right_n", "bottom_n", "field_key",
+                        "label", "candidate_value", "confidence", "original_state"},
+                "evidence_id=?", new String[]{Long.toString(evidenceId)}, null, null, "id")) {
+            while (cursor.moveToNext()) rows.add(new EvidenceBoxRow(cursor.getLong(0),
+                    cursor.getFloat(1), cursor.getFloat(2), cursor.getFloat(3), cursor.getFloat(4),
+                    cursor.isNull(5) ? null : cursor.getString(5),
+                    cursor.isNull(6) ? null : cursor.getString(6),
+                    cursor.isNull(7) ? null : cursor.getString(7), cursor.getFloat(8),
+                    BoxState.valueOf(cursor.getString(9))));
+        }
+        return rows;
+    }
+
+    /** Compares every persisted OCR observation with the current, editable report values. */
+    public synchronized ReviewSnapshot reviewSnapshot(String reportId) {
+        Map<String, MutableReviewField> fields = new LinkedHashMap<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor participants = db.query("participants", null, "report_id=?",
+                new String[]{reportId}, null, null, "side,id")) {
+            while (participants.moveToNext()) {
+                long participantId = participants.getLong(participants.getColumnIndexOrThrow("id"));
+                String side = participants.getString(participants.getColumnIndexOrThrow("side"));
+                String alliance = nullToEmpty(participants.getString(participants.getColumnIndexOrThrow("alliance_name")));
+                String name = nullToEmpty(participants.getString(participants.getColumnIndexOrThrow("player_name")));
+                Integer x = nullableInt(participants, "position_x");
+                Integer y = nullableInt(participants, "position_y");
+                String owner = FieldKeys.owner(alliance, name, x, y);
+                String player = (alliance.isEmpty() ? "" : "(" + alliance + ") ") +
+                        (name.isEmpty() ? "Unbekannter Spieler" : name);
+                addCurrent(fields, FieldKeys.participant(side, owner, "alliance"),
+                        sideLabel(side) + " · " + player + " · Allianz", alliance);
+                addCurrent(fields, FieldKeys.participant(side, owner, "name"),
+                        sideLabel(side) + " · " + player + " · Spielername", name);
+                addCurrent(fields, FieldKeys.participant(side, owner, "x"),
+                        sideLabel(side) + " · " + player + " · Position X", raw(x));
+                addCurrent(fields, FieldKeys.participant(side, owner, "y"),
+                        sideLabel(side) + " · " + player + " · Position Y", raw(y));
+                addCurrent(fields, FieldKeys.participant(side, owner, "total"),
+                        sideLabel(side) + " · " + player + " · Insgesamt", raw(nullableLong(participants, "total")));
+                addCurrent(fields, FieldKeys.participant(side, owner, "powerLoss"),
+                        sideLabel(side) + " · " + player + " · Kraftverlust", raw(nullableLong(participants, "power_loss")));
+                addCurrent(fields, FieldKeys.participant(side, owner, "kills"),
+                        sideLabel(side) + " · " + player + " · Getötete Feinde", raw(nullableLong(participants, "kills")));
+                addCurrent(fields, FieldKeys.participant(side, owner, "fallen"),
+                        sideLabel(side) + " · " + player + " · Gefallene", raw(nullableLong(participants, "fallen")));
+                addCurrent(fields, FieldKeys.participant(side, owner, "survivors"),
+                        sideLabel(side) + " · " + player + " · Überlebende", raw(nullableLong(participants, "survivors")));
+                addCurrent(fields, FieldKeys.participant(side, owner, "wounded"),
+                        sideLabel(side) + " · " + player + " · Verwundete", raw(nullableLong(participants, "wounded")));
+
+                String unitSql = "SELECT u.signature,t.display_name,u.tier,u.survivors,u.wounded,u.fallen,u.kills " +
+                        "FROM unit_rows u JOIN unit_types t ON t.signature=u.signature WHERE u.participant_id=? ORDER BY u.id";
+                try (Cursor units = db.rawQuery(unitSql, new String[]{Long.toString(participantId)})) {
+                    while (units.moveToNext()) {
+                        String signature = units.getString(0);
+                        String unit = units.getString(1);
+                        String prefix = sideLabel(side) + " · " + player + " · " + unit;
+                        addCurrent(fields, FieldKeys.unit(side, owner, signature, "tier"), prefix + " · Stufe", units.getString(2));
+                        addCurrent(fields, FieldKeys.unit(side, owner, signature, "survivors"), prefix + " · Überlebende", rawAt(units, 3));
+                        addCurrent(fields, FieldKeys.unit(side, owner, signature, "wounded"), prefix + " · Verwundete", rawAt(units, 4));
+                        addCurrent(fields, FieldKeys.unit(side, owner, signature, "fallen"), prefix + " · Gefallene", rawAt(units, 5));
+                        addCurrent(fields, FieldKeys.unit(side, owner, signature, "kills"), prefix + " · Getötete Feinde", rawAt(units, 6));
+                    }
+                }
+
+                Map<String, String> bonusValues = new HashMap<>();
+                String bonusSql = "SELECT b.label_key,b.value_raw FROM bonuses b WHERE b.participant_id=?";
+                try (Cursor bonuses = db.rawQuery(bonusSql, new String[]{Long.toString(participantId)})) {
+                    while (bonuses.moveToNext()) bonusValues.put(bonuses.getString(0), bonuses.getString(1));
+                }
+                for (StatusTypeRow status : listStatusTypes()) {
+                    addCurrent(fields, FieldKeys.bonus(side, owner, status.canonicalName),
+                            sideLabel(side) + " · " + player + " · " + status.displayName,
+                            bonusValues.get(status.canonicalKey));
+                }
+            }
+        }
+
+        String observationSql = "SELECT eb.field_key,eb.label,eb.candidate_value,eb.confidence,eb.original_state " +
+                "FROM evidence_boxes eb JOIN evidence_frames ef ON ef.id=eb.evidence_id " +
+                "WHERE ef.report_id=? AND eb.field_key IS NOT NULL ORDER BY ef.sequence,eb.id";
+        try (Cursor observations = db.rawQuery(observationSql, new String[]{reportId})) {
+            while (observations.moveToNext()) {
+                String key = observations.getString(0);
+                MutableReviewField field = fields.get(key);
+                if (field == null) {
+                    String label = observations.isNull(1) ? "Nicht zugeordnetes OCR-Feld" : observations.getString(1);
+                    field = new MutableReviewField(key, label, "");
+                    fields.put(key, field);
+                }
+                Observation candidate = new Observation(
+                        observations.isNull(2) ? "" : observations.getString(2),
+                        observations.getFloat(3), BoxState.valueOf(observations.getString(4)));
+                field.observe(candidate);
+            }
+        }
+
+        List<ReviewFieldRow> rows = new ArrayList<>();
+        for (MutableReviewField field : fields.values()) rows.add(field.freeze());
+        rows.sort(Comparator.comparingInt((ReviewFieldRow row) -> row.state.sortOrder)
+                .thenComparing(row -> row.label, String.CASE_INSENSITIVE_ORDER));
+        return new ReviewSnapshot(rows);
+    }
+
+    public synchronized void refreshReport(String reportId) {
+        Progress progress = getProgress(reportId);
+        recalculateEventPoints(reportId);
+        ReviewSnapshot review = reviewSnapshot(reportId);
+        boolean complete = progress.complete && review.missingCount == 0 && review.likelyCount == 0;
+        ContentValues values = new ContentValues();
+        values.put("status", complete ? "AKTUALISIERT · VOLLSTÄNDIG" : "AKTUALISIERT · OFFENE WERTE");
+        values.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("reports", values, "id=?", new String[]{reportId});
+    }
+
+    public synchronized ReportMode reportMode(String reportId) {
+        try (Cursor cursor = getReadableDatabase().query("reports",
+                new String[]{"event_mode", "resource_field"}, "id=?", new String[]{reportId},
+                null, null, null, "1")) {
+            if (cursor.moveToFirst()) return new ReportMode(cursor.getInt(0) == 1, cursor.getInt(1) == 1);
+        }
+        return new ReportMode(false, false);
+    }
+
+    public synchronized String participantOwner(long participantId) {
+        try (Cursor cursor = getReadableDatabase().query("participants",
+                new String[]{"alliance_name", "player_name", "position_x", "position_y"},
+                "id=?", new String[]{Long.toString(participantId)}, null, null, null, "1")) {
+            if (cursor.moveToFirst()) return FieldKeys.owner(cursor.getString(0), cursor.getString(1),
+                    cursor.isNull(2) ? null : cursor.getInt(2), cursor.isNull(3) ? null : cursor.getInt(3));
+        }
+        return "unknown";
     }
 
     public synchronized List<EditableParticipant> listEditableParticipants(String reportId) {
@@ -619,12 +816,16 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
                 "WHERE p.report_id=? AND (u.tier='?' OR u.tier='')", reportId);
         int bonuses = count("SELECT COUNT(*) FROM bonuses b JOIN participants p ON p.id=b.participant_id WHERE p.report_id=?", reportId);
         int pictures = evidenceCount(reportId);
+        ReviewSnapshot review = reviewSnapshot(reportId);
         return "| Prüfpunkt | Erfasst |\n|---|---:|\n" +
                 "| Spieler | " + participants + " |\n" +
                 "| Einheitenzeilen | " + units + " |\n" +
                 "| Stufen noch offen | " + unknownTiers + " |\n" +
                 "| Statuswerte | " + bonuses + " |\n" +
-                "| Belegbilder | " + pictures + " |";
+                "| Zusammengefügte Quellaufnahmen | " + pictures + " |\n" +
+                "| Sicher / identisch | " + review.exactCount + " |\n" +
+                "| Wahrscheinlich / prüfen | " + review.likelyCount + " |\n" +
+                "| Fehlende Werte | " + review.missingCount + " |";
     }
 
     public synchronized String reportDetails(String reportId) {
@@ -812,6 +1013,18 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
         }
         return values;
     }
+
+    private static void addCurrent(Map<String, MutableReviewField> fields, String key,
+                                   String label, String current) {
+        MutableReviewField existing = fields.get(key);
+        if (existing == null) fields.put(key, new MutableReviewField(key, label, current));
+        else if ((existing.current == null || existing.current.isEmpty()) && current != null) existing.current = current;
+    }
+
+    private static String raw(Number value) { return value == null ? "" : value.toString(); }
+    private static String rawAt(Cursor cursor, int index) { return cursor.isNull(index) ? "" : Long.toString(cursor.getLong(index)); }
+    private static String sideLabel(String side) { return "ATTACKER".equals(side) ? "Angreifer" : "Verteidiger"; }
+    private static double clamp01(double value) { return Math.max(0d, Math.min(1d, value)); }
 
     private void touchReport(String reportId) {
         if (reportId == null || reportId.isEmpty()) return;
@@ -1032,6 +1245,147 @@ public final class ScannerDatabase extends SQLiteOpenHelper {
                     "\nFELDER  | erkannt " + recognizedCount + " · offen " + pendingCount +
                     " · fehlerhaft " + invalidCount;
         }
+    }
+
+    public static final class EvidenceBoxRow {
+        public final long id;
+        public final float left, top, right, bottom, confidence;
+        public final String fieldKey, label, candidateValue;
+        public final BoxState originalState;
+
+        public EvidenceBoxRow(long id, float left, float top, float right, float bottom,
+                              String fieldKey, String label, String candidateValue,
+                              float confidence, BoxState originalState) {
+            this.id = id; this.left = left; this.top = top; this.right = right; this.bottom = bottom;
+            this.fieldKey = fieldKey; this.label = label; this.candidateValue = candidateValue;
+            this.confidence = confidence; this.originalState = originalState;
+        }
+    }
+
+    public enum ReviewState {
+        MISSING(0), LIKELY(1), EXACT(2);
+        final int sortOrder;
+        ReviewState(int sortOrder) { this.sortOrder = sortOrder; }
+    }
+
+    public static final class ReviewFieldRow {
+        public final String key, label, currentValue, candidateValue;
+        public final float confidence;
+        public final ReviewState state;
+
+        ReviewFieldRow(String key, String label, String currentValue, String candidateValue,
+                       float confidence, ReviewState state) {
+            this.key = key; this.label = label; this.currentValue = currentValue;
+            this.candidateValue = candidateValue; this.confidence = confidence; this.state = state;
+        }
+
+        public String stateLabel() {
+            if (state == ReviewState.EXACT) return "SICHER";
+            if (state == ReviewState.LIKELY) return "WAHRSCHEINLICH";
+            return "FEHLT";
+        }
+
+        public String tableLine() {
+            String current = currentValue == null || currentValue.isEmpty() ? "—" : currentValue;
+            String candidate = candidateValue == null || candidateValue.isEmpty() ? "—" : candidateValue;
+            return String.format(Locale.GERMANY, "%-16s | %s\nBERICHT          | %s\nOCR-KANDIDAT     | %s · %.0f %%",
+                    stateLabel(), label, current, candidate, confidence * 100f);
+        }
+    }
+
+    public static final class ReviewSnapshot {
+        public final List<ReviewFieldRow> fields;
+        public final int exactCount, likelyCount, missingCount;
+        private final Map<String, ReviewFieldRow> byKey = new HashMap<>();
+
+        ReviewSnapshot(List<ReviewFieldRow> fields) {
+            this.fields = fields;
+            int exact = 0, likely = 0, missing = 0;
+            for (ReviewFieldRow field : fields) {
+                byKey.put(field.key, field);
+                if (field.state == ReviewState.EXACT) exact++;
+                else if (field.state == ReviewState.LIKELY) likely++;
+                else missing++;
+            }
+            exactCount = exact; likelyCount = likely; missingCount = missing;
+        }
+
+        public ReviewState stateFor(EvidenceBoxRow box) {
+            if (box != null && box.fieldKey != null) {
+                ReviewFieldRow field = byKey.get(box.fieldKey);
+                if (field != null) return field.state;
+            }
+            if (box == null || box.originalState == BoxState.PENDING) return ReviewState.MISSING;
+            return box.originalState == BoxState.VALID ? ReviewState.EXACT : ReviewState.LIKELY;
+        }
+
+        public String table() {
+            return "| Abgleich | Felder |\n|---|---:|\n" +
+                    "| Sicher / identisch | " + exactCount + " |\n" +
+                    "| Wahrscheinlich / prüfen | " + likelyCount + " |\n" +
+                    "| Fehlt | " + missingCount + " |";
+        }
+    }
+
+    public static final class ReportMode {
+        public final boolean eventMode, resourceField;
+        ReportMode(boolean eventMode, boolean resourceField) {
+            this.eventMode = eventMode; this.resourceField = resourceField;
+        }
+    }
+
+    private static final class Observation {
+        final String value;
+        final float confidence;
+        final BoxState state;
+        Observation(String value, float confidence, BoxState state) {
+            this.value = value == null ? "" : value.trim();
+            this.confidence = confidence;
+            this.state = state;
+        }
+    }
+
+    private static final class MutableReviewField {
+        final String key, label;
+        String current;
+        Observation observation;
+
+        MutableReviewField(String key, String label, String current) {
+            this.key = key; this.label = label == null ? "OCR-Feld" : label;
+            this.current = current == null ? "" : current.trim();
+        }
+
+        void observe(Observation candidate) {
+            if (observation == null) {
+                observation = candidate;
+                return;
+            }
+            boolean candidateMatches = sameValue(key, current, candidate.value);
+            boolean oldMatches = sameValue(key, current, observation.value);
+            if ((candidateMatches && !oldMatches) || (candidateMatches == oldMatches &&
+                    candidate.confidence > observation.confidence)) observation = candidate;
+        }
+
+        ReviewFieldRow freeze() {
+            String candidate = observation == null ? "" : observation.value;
+            float confidence = observation == null ? (current.isEmpty() ? 0f : 1f) : observation.confidence;
+            ReviewState state;
+            if (current.isEmpty() && candidate.isEmpty()) state = ReviewState.MISSING;
+            else if (!current.isEmpty() && candidate.isEmpty()) state = ReviewState.EXACT;
+            else if (observation == null) state = ReviewState.EXACT; // A manually supplied final value is authoritative.
+            else if (sameValue(key, current, candidate) && confidence >= 0.92f &&
+                    observation.state == BoxState.VALID) state = ReviewState.EXACT;
+            else state = ReviewState.LIKELY;
+            return new ReviewFieldRow(key, label, current, candidate, confidence, state);
+        }
+    }
+
+    private static boolean sameValue(String key, String first, String second) {
+        if (first == null || second == null || first.trim().isEmpty() || second.trim().isEmpty()) return false;
+        if (key.endsWith("|name") || key.endsWith("|alliance") || key.endsWith("|tier")) {
+            return TextNormalization.key(first).equals(TextNormalization.key(second));
+        }
+        return FieldKeys.normalizeValue(first).equals(FieldKeys.normalizeValue(second));
     }
 
     public static final class EditableParticipant {

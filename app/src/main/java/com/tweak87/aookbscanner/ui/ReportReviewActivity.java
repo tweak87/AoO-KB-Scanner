@@ -2,42 +2,46 @@ package com.tweak87.aookbscanner.ui;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
+import android.content.Intent;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
-import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.tweak87.aookbscanner.MainActivity;
 import com.tweak87.aookbscanner.db.ScannerDatabase;
 import com.tweak87.aookbscanner.db.ScannerDatabase.EditableBonus;
 import com.tweak87.aookbscanner.db.ScannerDatabase.EditableParticipant;
 import com.tweak87.aookbscanner.db.ScannerDatabase.EditableUnit;
-import com.tweak87.aookbscanner.db.ScannerDatabase.EvidenceFrameRow;
+import com.tweak87.aookbscanner.db.ScannerDatabase.ReviewFieldRow;
+import com.tweak87.aookbscanner.db.ScannerDatabase.ReviewSnapshot;
+import com.tweak87.aookbscanner.db.ScannerDatabase.ReviewState;
 import com.tweak87.aookbscanner.db.ScannerDatabase.StatusTypeRow;
 import com.tweak87.aookbscanner.db.ScannerDatabase.UnitTypeRow;
 import com.tweak87.aookbscanner.event.EventScoring;
 import com.tweak87.aookbscanner.ocr.NumberParser;
+import com.tweak87.aookbscanner.review.ReportCollageBuilder;
+import com.tweak87.aookbscanner.review.LongImageView;
 import com.tweak87.aookbscanner.util.Ui;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
-/** One review surface for editable OCR values and the vertically connected evidence document. */
+/** Continuous evidence document, final-value comparison, rescan selection and editor. */
 public final class ReportReviewActivity extends Activity {
     public static final String EXTRA_REPORT_ID = "report_id";
     private static final String[] TIERS = {
@@ -46,69 +50,211 @@ public final class ReportReviewActivity extends Activity {
 
     private ScannerDatabase database;
     private String reportId;
+    private ScrollView scroll;
+    private LinearLayout issues;
     private LinearLayout editor;
+    private TextView editorTitle;
     private TextView coverage;
-    private EvidenceAdapter evidenceAdapter;
+    private TextView collageStatus;
+    private LongImageView collageView;
+    private boolean building;
+    private boolean destroyed;
+    private boolean selectionInitialized;
+    private final Set<String> selectedKeys = new HashSet<>();
+    private final List<CheckBox> issueChecks = new ArrayList<>();
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         database = new ScannerDatabase(this);
         reportId = getIntent().getStringExtra(EXTRA_REPORT_ID);
-        if (reportId == null) {
-            finish();
-            return;
-        }
+        if (reportId == null) { finish(); return; }
 
-        ListView document = new ListView(this);
-        document.setBackgroundColor(Ui.NAVY);
-        document.setDividerHeight(0);
-        document.setClipToPadding(false);
-        document.setPadding(0, 0, 0, Ui.dp(this, 24));
+        LinearLayout page = Ui.verticalPage(this);
+        page.addView(Ui.backHeader(this, "Bericht prüfen"));
+        page.addView(Ui.text(this,
+                "Diese Ansicht vergleicht die gespeicherten OCR-Kandidaten mit dem aktuell bearbeiteten " +
+                        "Bericht. Grün = identisch, Gelb = wahrscheinlich/prüfen, Rot = fehlt.",
+                14, Ui.MUTED));
+        page.addView(Ui.spacer(this, 10));
 
-        LinearLayout header = Ui.verticalPage(this);
-        header.addView(Ui.backHeader(this, "Scan-Prüfung"));
-        TextView intro = Ui.text(this,
-                "Grün = erkannt · Gelb = offen · Rot = unplausibel. Tippe auf eine Tabellenzeile, " +
-                        "um den Wert zu korrigieren. Die Bilder darunter bilden das zusammenhängende Scan-Dokument.",
-                14, Ui.MUTED);
-        header.addView(intro);
-        header.addView(Ui.spacer(this, 10));
         coverage = tableText("");
-        header.addView(coverage, panelParams());
+        page.addView(coverage, panelParams());
+        page.addView(section("FELDABGLEICH / NACHSCAN-AUSWAHL"));
+
+        LinearLayout quickActions = new LinearLayout(this);
+        quickActions.setOrientation(LinearLayout.HORIZONTAL);
+        Button selectOpen = Ui.button(this, "Offene markieren", Ui.PANEL);
+        selectOpen.setOnClickListener(view -> selectOpenFields());
+        Button jumpEditor = Ui.button(this, "Korrekturmaske", Ui.AMBER);
+        jumpEditor.setTextColor(Ui.NAVY);
+        jumpEditor.setOnClickListener(view -> jumpToEditor());
+        quickActions.addView(selectOpen, halfLeft());
+        quickActions.addView(jumpEditor, halfRight());
+        page.addView(quickActions);
+
+        issues = new LinearLayout(this);
+        issues.setOrientation(LinearLayout.VERTICAL);
+        page.addView(issues);
+        Button rescan = Ui.button(this, "Markierte Werte manuell nachscannen", Ui.AMBER);
+        rescan.setTextColor(Ui.NAVY);
+        rescan.setOnClickListener(view -> startManualRescan());
+        page.addView(rescan);
+
+        page.addView(section("ZUSAMMENHÄNGENDES SCAN-DOKUMENT"));
+        collageStatus = Ui.text(this, "Dokument wird erstellt …", 14, Ui.MUTED);
+        page.addView(collageStatus);
+        collageView = new LongImageView(this);
+        collageView.setBackground(Ui.rounded(Ui.NAVY, Ui.dp(this, 8), Ui.GREEN, Ui.dp(this, 1)));
+        collageView.setOnClickListener(view -> jumpToEditor());
+        page.addView(collageView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        editorTitle = section("BEARBEITUNGSMASKE");
+        page.addView(editorTitle);
         editor = new LinearLayout(this);
         editor.setOrientation(LinearLayout.VERTICAL);
-        header.addView(editor);
-        document.addHeaderView(header, null, false);
+        page.addView(editor);
+        Button update = Ui.button(this, "Bericht aktualisieren", Ui.GREEN);
+        update.setOnClickListener(view -> updateReport());
+        page.addView(update);
 
-        evidenceAdapter = new EvidenceAdapter();
-        document.setAdapter(evidenceAdapter);
-        setContentView(document);
+        scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(page);
+        setContentView(scroll);
     }
 
     @Override protected void onResume() {
         super.onResume();
-        reload();
+        reload(true);
     }
 
-    private void reload() {
-        coverage.setText(database.coverageTable(reportId));
-        editor.removeAllViews();
-        editor.addView(section("ERKANNTE WERTE / KORREKTUR"));
-        List<EditableParticipant> participants = database.listEditableParticipants(reportId);
-        if (participants.isEmpty()) {
-            editor.addView(Ui.text(this, "Noch keine Spieler erkannt. Zeige im Scan zuerst eine Spielerkarte.",
-                    15, Ui.AMBER));
+    @Override protected void onDestroy() {
+        destroyed = true;
+        if (collageView != null) collageView.close();
+        database.close();
+        super.onDestroy();
+    }
+
+    private void reload(boolean rebuildDocument) {
+        ReviewSnapshot snapshot = database.reviewSnapshot(reportId);
+        coverage.setText(database.coverageTable(reportId) + "\n\n" + snapshot.table());
+        loadIssues(snapshot);
+        loadEditor();
+        if (rebuildDocument) buildAndLoadCollage();
+    }
+
+    private void loadIssues(ReviewSnapshot snapshot) {
+        issues.removeAllViews();
+        issueChecks.clear();
+        for (ReviewFieldRow field : snapshot.fields) {
+            CheckBox check = new CheckBox(this);
+            check.setTag(field);
+            check.setText(field.tableLine());
+            check.setTextColor(Ui.WHITE);
+            check.setTextSize(12);
+            check.setTypeface(Typeface.MONOSPACE);
+            check.setPadding(Ui.dp(this, 9), Ui.dp(this, 8), Ui.dp(this, 9), Ui.dp(this, 8));
+            int color = field.state == ReviewState.EXACT ? Ui.GREEN :
+                    field.state == ReviewState.LIKELY ? Ui.AMBER : Ui.RED;
+            check.setBackground(Ui.rounded(Ui.PANEL, Ui.dp(this, 8), color, Ui.dp(this, 2)));
+            boolean checked = selectionInitialized ? selectedKeys.contains(field.key) : field.state != ReviewState.EXACT;
+            check.setChecked(checked);
+            if (checked) selectedKeys.add(field.key);
+            check.setOnCheckedChangeListener((button, value) -> {
+                if (value) selectedKeys.add(field.key); else selectedKeys.remove(field.key);
+            });
+            check.setOnLongClickListener(view -> { jumpToEditor(); return true; });
+            LinearLayout.LayoutParams params = panelParams();
+            params.setMargins(0, 0, 0, Ui.dp(this, 7));
+            issues.addView(check, params);
+            issueChecks.add(check);
         }
+        selectionInitialized = true;
+        if (snapshot.fields.isEmpty()) issues.addView(Ui.text(this,
+                "Noch keine vergleichbaren Werte gespeichert.", 14, Ui.AMBER));
+    }
+
+    private void loadEditor() {
+        editor.removeAllViews();
+        List<EditableParticipant> participants = database.listEditableParticipants(reportId);
+        if (participants.isEmpty()) editor.addView(Ui.text(this,
+                "Noch keine Spieler erkannt. Nutze einen Nachscan und zeige zuerst die Spielerkarte.", 15, Ui.AMBER));
         for (EditableParticipant participant : participants) addParticipant(participant);
-        Button reviewed = Ui.button(this, "Alle Werte als manuell geprüft markieren", Ui.GREEN);
+        Button reviewed = Ui.button(this, "Alle aktuellen Werte als manuell geprüft markieren", Ui.PANEL);
         reviewed.setOnClickListener(view -> {
             database.markReportReviewed(reportId);
-            Toast.makeText(this, "Bericht als manuell geprüft markiert.", Toast.LENGTH_SHORT).show();
-            reload();
+            Toast.makeText(this, "Aktuelle Werte als geprüft gespeichert. Jetzt Bericht aktualisieren.",
+                    Toast.LENGTH_LONG).show();
+            reload(false);
         });
         editor.addView(reviewed);
-        editor.addView(section("SCAN-DOKUMENT"));
-        evidenceAdapter.reload(database.listEvidence(reportId));
+    }
+
+    private void updateReport() {
+        database.refreshReport(reportId);
+        Toast.makeText(this, "Finaler Bericht, Punkte und Prüfdokument werden aktualisiert.",
+                Toast.LENGTH_LONG).show();
+        reload(false);
+        buildAndLoadCollage();
+    }
+
+    private void startManualRescan() {
+        ArrayList<String> keys = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        for (CheckBox check : issueChecks) {
+            if (!check.isChecked()) continue;
+            ReviewFieldRow field = (ReviewFieldRow) check.getTag();
+            keys.add(field.key);
+            labels.add(field.label);
+        }
+        if (keys.isEmpty()) {
+            Toast.makeText(this, "Bitte mindestens einen Wert markieren.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent = new Intent(this, MainActivity.class)
+                .putExtra(MainActivity.EXTRA_MANUAL_REPORT_ID, reportId)
+                .putStringArrayListExtra(MainActivity.EXTRA_MANUAL_FIELD_KEYS, keys)
+                .putStringArrayListExtra(MainActivity.EXTRA_MANUAL_FIELD_LABELS, labels)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        startActivity(intent);
+    }
+
+    private void selectOpenFields() {
+        selectedKeys.clear();
+        for (CheckBox check : issueChecks) {
+            ReviewFieldRow field = (ReviewFieldRow) check.getTag();
+            boolean open = field.state != ReviewState.EXACT;
+            check.setChecked(open);
+            if (open) selectedKeys.add(field.key);
+        }
+    }
+
+    private void jumpToEditor() {
+        scroll.post(() -> scroll.smoothScrollTo(0, Math.max(0, editorTitle.getTop() - Ui.dp(this, 12))));
+    }
+
+    private void buildAndLoadCollage() {
+        if (building) return;
+        building = true;
+        collageStatus.setText("Ein zusammenhängendes Bild wird aus überlappenden Scanbereichen erstellt …");
+        new Thread(() -> {
+            File file = new ReportCollageBuilder(this, database).build(reportId);
+            runOnUiThread(() -> {
+                building = false;
+                if (destroyed) return;
+                if (file == null || !file.isFile()) {
+                    collageStatus.setText("Noch kein Scan-Dokument vorhanden. Starte einen Nachscan.");
+                    collageView.setImage(null);
+                    return;
+                }
+                collageView.setImage(file);
+                ReviewSnapshot refreshed = database.reviewSnapshot(reportId);
+                collageStatus.setText("Ein Bild · Grün " + refreshed.exactCount + " · Gelb " +
+                        refreshed.likelyCount + " · Rot " + refreshed.missingCount +
+                        " · Antippen: zur Korrekturmaske");
+            });
+        }, "AoO-collage").start();
     }
 
     private void addParticipant(EditableParticipant participant) {
@@ -121,7 +267,7 @@ public final class ReportReviewActivity extends Activity {
                     "Stufe   | " + dash(unit.tier) + "\n" +
                     "Art     | " + dash(unit.category) + "\n" +
                     "Überl.  | " + number(unit.survivors) + "   Verw. | " + number(unit.wounded) + "\n" +
-                    "Gefall.  | " + number(unit.fallen) + "   Kills | " + number(unit.kills));
+                    "Gefall. | " + number(unit.fallen) + "   Kills | " + number(unit.kills));
             row.setOnClickListener(view -> editUnit(unit));
             editor.addView(row, insetPanelParams());
         }
@@ -137,12 +283,8 @@ public final class ReportReviewActivity extends Activity {
         addUnit.setOnClickListener(view -> addUnit(participant));
         Button addStatus = Ui.button(this, "+ Statuswert", Ui.PANEL);
         addStatus.setOnClickListener(view -> addStatus(participant));
-        LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f);
-        left.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 4), Ui.dp(this, 12));
-        LinearLayout.LayoutParams right = new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f);
-        right.setMargins(Ui.dp(this, 4), 0, 0, Ui.dp(this, 12));
-        additions.addView(addUnit, left);
-        additions.addView(addStatus, right);
+        additions.addView(addUnit, halfLeft());
+        additions.addView(addStatus, halfRight());
         editor.addView(additions);
     }
 
@@ -163,7 +305,7 @@ public final class ReportReviewActivity extends Activity {
             database.updateParticipant(row.id, alliance.getText().toString(), name.getText().toString(),
                     integer(x), integer(y), number(total), number(loss), number(kills), number(fallen),
                     number(survivors), number(wounded));
-            reload();
+            reload(false);
         });
     }
 
@@ -180,7 +322,7 @@ public final class ReportReviewActivity extends Activity {
         showForm(row.displayName + " korrigieren", form, () -> {
             database.updateUnitRow(row.id, TIERS[tier.getSelectedItemPosition()],
                     number(survivors), number(wounded), number(fallen), number(kills));
-            reload();
+            reload(false);
         });
     }
 
@@ -190,7 +332,7 @@ public final class ReportReviewActivity extends Activity {
         form.addView(value);
         showForm(row.displayName, form, () -> {
             database.updateBonus(row.id, value.getText().toString());
-            reload();
+            reload(false);
         });
     }
 
@@ -204,13 +346,11 @@ public final class ReportReviewActivity extends Activity {
         Spinner status = new Spinner(this);
         status.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, rows));
         EditText value = field("Wert, z. B. 422.9%", "", false);
-        form.addView(label("Statuswert"));
-        form.addView(status);
-        form.addView(value);
+        form.addView(label("Statuswert")); form.addView(status); form.addView(value);
         showForm("Statuswert hinzufügen", form, () -> {
             StatusTypeRow selected = rows.get(status.getSelectedItemPosition());
             database.addBonus(participant.id, selected.canonicalKey, value.getText().toString());
-            reload();
+            reload(false);
         });
     }
 
@@ -229,22 +369,16 @@ public final class ReportReviewActivity extends Activity {
         EditText wounded = field("Verwundete", "", true);
         EditText fallen = field("Gefallene", "", true);
         EditText kills = field("Getötete Feinde", "", true);
-        form.addView(label("Einheit")); form.addView(type);
-        add(form, name, category);
-        form.addView(label("Stufe")); form.addView(tier);
-        add(form, survivors, wounded, fallen, kills);
+        form.addView(label("Einheit")); form.addView(type); add(form, name, category);
+        form.addView(label("Stufe")); form.addView(tier); add(form, survivors, wounded, fallen, kills);
         showForm("Einheit hinzufügen", form, () -> {
             String selectedTier = TIERS[tier.getSelectedItemPosition()];
-            String signature;
-            if (type.getSelectedItemPosition() == 0) {
-                signature = database.createManualUnitType(name.getText().toString(),
-                        category.getText().toString(), selectedTier);
-            } else {
-                signature = rows.get(type.getSelectedItemPosition() - 1).signature;
-            }
+            String signature = type.getSelectedItemPosition() == 0
+                    ? database.createManualUnitType(name.getText().toString(), category.getText().toString(), selectedTier)
+                    : rows.get(type.getSelectedItemPosition() - 1).signature;
             database.addUnitRow(participant.id, signature, selectedTier, number(survivors),
                     number(wounded), number(fallen), number(kills));
-            reload();
+            reload(false);
         });
     }
 
@@ -290,6 +424,18 @@ public final class ReportReviewActivity extends Activity {
         return params;
     }
 
+    private LinearLayout.LayoutParams halfLeft() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1f);
+        params.setMargins(0, 0, Ui.dp(this, 4), Ui.dp(this, 9));
+        return params;
+    }
+
+    private LinearLayout.LayoutParams halfRight() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1f);
+        params.setMargins(Ui.dp(this, 4), 0, 0, Ui.dp(this, 9));
+        return params;
+    }
+
     private LinearLayout form() {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -325,21 +471,15 @@ public final class ReportReviewActivity extends Activity {
     }
 
     private void showForm(String title, LinearLayout form, Runnable save) {
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(form);
-        new AlertDialog.Builder(this).setTitle(title).setView(scroll)
+        ScrollView formScroll = new ScrollView(this);
+        formScroll.addView(form);
+        new AlertDialog.Builder(this).setTitle(title).setView(formScroll)
                 .setNegativeButton("Abbrechen", null)
                 .setPositiveButton("Speichern", (dialog, which) -> save.run()).show();
     }
 
-    private static void add(LinearLayout form, View... views) {
-        for (View view : views) form.addView(view);
-    }
-
-    private static String dash(String value) {
-        return value == null || value.trim().isEmpty() ? "—" : value.trim();
-    }
-
+    private static void add(LinearLayout form, View... views) { for (View view : views) form.addView(view); }
+    private static String dash(String value) { return value == null || value.trim().isEmpty() ? "—" : value.trim(); }
     private static String value(Number value) { return value == null ? "" : value.toString(); }
     private static String number(Number value) {
         return value == null ? "—" : String.format(Locale.GERMANY, "%,d", value.longValue());
@@ -348,67 +488,5 @@ public final class ReportReviewActivity extends Activity {
     private static Integer integer(EditText field) {
         Long value = number(field);
         return value == null || value > Integer.MAX_VALUE ? null : value.intValue();
-    }
-
-    private final class EvidenceAdapter extends BaseAdapter {
-        private final List<EvidenceFrameRow> rows = new ArrayList<>();
-
-        void reload(List<EvidenceFrameRow> values) {
-            rows.clear();
-            rows.addAll(values);
-            notifyDataSetChanged();
-        }
-
-        @Override public int getCount() { return Math.max(1, rows.size()); }
-        @Override public Object getItem(int position) { return rows.isEmpty() ? null : rows.get(position); }
-        @Override public long getItemId(int position) { return rows.isEmpty() ? 0 : rows.get(position).id; }
-
-        @Override public View getView(int position, View convertView, ViewGroup parent) {
-            if (rows.isEmpty()) {
-                TextView empty = Ui.text(ReportReviewActivity.this,
-                        "Für diesen älteren Bericht wurden noch keine Belegbilder gespeichert.", 15, Ui.AMBER);
-                empty.setPadding(Ui.dp(ReportReviewActivity.this, 20), Ui.dp(ReportReviewActivity.this, 16),
-                        Ui.dp(ReportReviewActivity.this, 20), Ui.dp(ReportReviewActivity.this, 24));
-                return empty;
-            }
-            EvidenceRow holder;
-            if (!(convertView instanceof LinearLayout) || convertView.getTag() == null) {
-                LinearLayout root = new LinearLayout(ReportReviewActivity.this);
-                root.setOrientation(LinearLayout.VERTICAL);
-                TextView caption = Ui.text(ReportReviewActivity.this, "", 12, Ui.WHITE);
-                caption.setTypeface(Typeface.MONOSPACE);
-                caption.setPadding(Ui.dp(ReportReviewActivity.this, 12), Ui.dp(ReportReviewActivity.this, 7),
-                        Ui.dp(ReportReviewActivity.this, 12), Ui.dp(ReportReviewActivity.this, 7));
-                ImageView image = new ImageView(ReportReviewActivity.this);
-                image.setAdjustViewBounds(true);
-                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                image.setPadding(Ui.dp(ReportReviewActivity.this, 2), Ui.dp(ReportReviewActivity.this, 2),
-                        Ui.dp(ReportReviewActivity.this, 2), Ui.dp(ReportReviewActivity.this, 2));
-                image.setBackground(Ui.rounded(Ui.NAVY, 0, Ui.GREEN, Ui.dp(ReportReviewActivity.this, 2)));
-                root.addView(caption, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT));
-                root.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT));
-                holder = new EvidenceRow(caption, image);
-                root.setTag(holder);
-                convertView = root;
-            } else {
-                holder = (EvidenceRow) convertView.getTag();
-            }
-            EvidenceFrameRow row = rows.get(position);
-            holder.caption.setText(row.label());
-            Bitmap previous = (Bitmap) holder.image.getTag();
-            if (previous != null && !previous.isRecycled()) previous.recycle();
-            Bitmap bitmap = new File(row.filePath).isFile() ? BitmapFactory.decodeFile(row.filePath) : null;
-            holder.image.setImageBitmap(bitmap);
-            holder.image.setTag(bitmap);
-            return convertView;
-        }
-    }
-
-    private static final class EvidenceRow {
-        final TextView caption;
-        final ImageView image;
-        EvidenceRow(TextView caption, ImageView image) { this.caption = caption; this.image = image; }
     }
 }

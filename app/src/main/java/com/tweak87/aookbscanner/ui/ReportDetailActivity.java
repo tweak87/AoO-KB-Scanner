@@ -17,6 +17,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.tweak87.aookbscanner.db.ScannerDatabase;
+import com.tweak87.aookbscanner.review.ReportCollageBuilder;
 import com.tweak87.aookbscanner.util.Ui;
 
 import java.io.IOException;
@@ -117,7 +118,9 @@ public final class ReportDetailActivity extends Activity {
         if (destination == null) return;
         try (OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
             if (output == null) throw new IOException("Zieldatei konnte nicht geöffnet werden");
-            ReportPdfExporter.write(reportText, displayId, database.listEvidence(reportId), output);
+            java.io.File collage = ReportCollageBuilder.file(this, reportId);
+            if (!collage.isFile()) collage = new ReportCollageBuilder(this, database).build(reportId);
+            ReportPdfExporter.write(reportText, displayId, collage, output);
             Toast.makeText(this, "PDF wurde gespeichert.", Toast.LENGTH_LONG).show();
         } catch (IOException error) {
             Toast.makeText(this, "PDF konnte nicht gespeichert werden: " + error.getMessage(),

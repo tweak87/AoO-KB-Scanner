@@ -34,13 +34,17 @@ import com.tweak87.aookbscanner.db.ScannerDatabase;
 import com.tweak87.aookbscanner.model.Models.AnalysisResult;
 import com.tweak87.aookbscanner.model.Models.BoxState;
 import com.tweak87.aookbscanner.model.Models.ParsedFrame;
+import com.tweak87.aookbscanner.model.Models.OverlayBox;
 import com.tweak87.aookbscanner.model.Models.ScreenType;
 import com.tweak87.aookbscanner.ocr.OcrParser;
 import com.tweak87.aookbscanner.ocr.ReportAssembler;
 import com.tweak87.aookbscanner.overlay.OverlayController;
+import com.tweak87.aookbscanner.review.ReportCollageBuilder;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,11 +52,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Foreground service that samples MediaProjection frames and runs bundled on-device OCR. */
 public final class CaptureService extends Service {
     public static final String ACTION_START = "com.tweak87.aookbscanner.START";
+    public static final String ACTION_BEGIN_MANUAL = "com.tweak87.aookbscanner.BEGIN_MANUAL";
     public static final String ACTION_STOP = "com.tweak87.aookbscanner.STOP";
     public static final String EXTRA_RESULT_CODE = "result_code";
     public static final String EXTRA_RESULT_DATA = "result_data";
     public static final String EXTRA_EVENT_MODE = "event_mode";
     public static final String EXTRA_RESOURCE_FIELD = "resource_field";
+    public static final String EXTRA_MANUAL_REPORT_ID = "manual_report_id";
+    public static final String EXTRA_MANUAL_FIELD_KEYS = "manual_field_keys";
+    public static final String EXTRA_MANUAL_FIELD_LABELS = "manual_field_labels";
     public static volatile boolean isRunning;
 
     private static final String CHANNEL_ID = "aoo_scanner_capture";
@@ -72,6 +80,7 @@ public final class CaptureService extends Service {
     private OcrParser parser;
     private ReportAssembler assembler;
     private EvidenceStore evidenceStore;
+    private ScannerDatabase database;
     private int captureWidth;
     private int captureHeight;
     private long lastFrameAt;
@@ -82,6 +91,12 @@ public final class CaptureService extends Service {
     private boolean resourceField;
     private int outsideReportFrames;
     private String finishedStatus = "Bericht gespeichert";
+    private boolean manualMode;
+    private String pendingManualReportId;
+    private ArrayList<String> manualFieldKeys = new ArrayList<>();
+    private ArrayList<String> manualFieldLabels = new ArrayList<>();
+    private final Set<String> manualRemaining = new HashSet<>();
+    private int manualTargetTotal;
 
     private enum ScanState { WAITING, READY, SCANNING, WAIT_FOR_EXIT }
 
@@ -91,7 +106,7 @@ public final class CaptureService extends Service {
         createNotificationChannel();
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         overlay = new OverlayController(this);
-        ScannerDatabase database = new ScannerDatabase(this);
+        database = new ScannerDatabase(this);
         parser = new OcrParser(database.statusAliasMap());
         assembler = new ReportAssembler(database);
         evidenceStore = new EvidenceStore(this, database);
@@ -107,6 +122,15 @@ public final class CaptureService extends Service {
             stopCapture();
             return START_NOT_STICKY;
         }
+        if (ACTION_BEGIN_MANUAL.equals(intent.getAction())) {
+            if (isRunning) {
+                String reportId = intent.getStringExtra(EXTRA_MANUAL_REPORT_ID);
+                ArrayList<String> keys = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_KEYS);
+                ArrayList<String> labels = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_LABELS);
+                analysisExecutor.execute(() -> beginManualSession(reportId, keys, labels));
+            }
+            return START_NOT_STICKY;
+        }
         if (!ACTION_START.equals(intent.getAction()) || isRunning) return START_NOT_STICKY;
 
         startForegroundCompat(buildNotification("Scanner wird gestartet …"));
@@ -114,6 +138,11 @@ public final class CaptureService extends Service {
         Intent resultData = parcelableIntent(intent, EXTRA_RESULT_DATA);
         eventMode = intent.getBooleanExtra(EXTRA_EVENT_MODE, false);
         resourceField = eventMode && intent.getBooleanExtra(EXTRA_RESOURCE_FIELD, false);
+        pendingManualReportId = intent.getStringExtra(EXTRA_MANUAL_REPORT_ID);
+        ArrayList<String> keys = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_KEYS);
+        ArrayList<String> labels = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_LABELS);
+        manualFieldKeys = keys == null ? new ArrayList<>() : keys;
+        manualFieldLabels = labels == null ? new ArrayList<>() : labels;
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopCapture();
             return START_NOT_STICKY;
@@ -151,6 +180,11 @@ public final class CaptureService extends Service {
         isRunning = true;
         overlay.show();
         notifyStatus("STATUS: Scanner aktiv");
+        if (pendingManualReportId != null) {
+            String reportId = pendingManualReportId;
+            pendingManualReportId = null;
+            analysisExecutor.execute(() -> beginManualSession(reportId, manualFieldKeys, manualFieldLabels));
+        }
     }
 
     private void onImageAvailable(ImageReader reader) {
@@ -202,6 +236,15 @@ public final class CaptureService extends Service {
                         "STATUS | BERICHT ERKANNT\nAKTION | SCAN STARTEN\nMODUS  | " + mode,
                         BoxState.VALID);
             }
+            if (frame.screenType == ScreenType.ARMY_INFO) {
+                pendingHeader = new ParsedFrame();
+                pendingHeader.screenType = ScreenType.BATTLE_SUMMARY;
+                scanState = ScanState.READY;
+                overlay.showControl("Scan starten", () -> analysisExecutor.execute(this::beginScanSession));
+                return new AnalysisResult(frame.boxes,
+                        "STATUS | BERICHTDETAIL ERKANNT\nAKTION | SCAN STARTEN",
+                        BoxState.VALID);
+            }
             if (frame.screenType == ScreenType.MESSAGE_LIST) {
                 return new AnalysisResult(frame.boxes,
                         "STATUS | NACHRICHTEN\nAKTION | BERICHT ÖFFNEN", BoxState.PENDING);
@@ -223,7 +266,16 @@ public final class CaptureService extends Service {
                     "STATUS | BERICHT ERKANNT\nAKTION | SCAN STARTEN", BoxState.VALID);
         }
 
-        if (scanState == ScanState.SCANNING) return assembler.acceptFrame(frame);
+        if (scanState == ScanState.SCANNING) {
+            AnalysisResult accepted = assembler.acceptFrame(frame);
+            if (!manualMode) return accepted;
+            for (OverlayBox box : accepted.boxes) {
+                if (box.fieldKey != null && box.candidateValue != null && !box.candidateValue.isEmpty()) {
+                    manualRemaining.remove(box.fieldKey);
+                }
+            }
+            return new AnalysisResult(accepted.boxes, accepted.status + manualTargetStatus(), accepted.statusState);
+        }
 
         boolean outside = frame.screenType == ScreenType.MESSAGE_LIST || frame.screenType == ScreenType.NONE;
         outsideReportFrames = outside ? outsideReportFrames + 1 : 0;
@@ -241,6 +293,7 @@ public final class CaptureService extends Service {
         if (scanState != ScanState.READY || pendingHeader == null) return;
         AnalysisResult result = assembler.startSession(pendingHeader, eventMode, resourceField);
         evidenceStore.begin(assembler.currentReportId());
+        manualMode = false;
         pendingHeader = null;
         scanState = ScanState.SCANNING;
         overlay.showControl("Scan beenden", () -> analysisExecutor.execute(this::finishScanSession));
@@ -248,8 +301,43 @@ public final class CaptureService extends Service {
         notifyStatus("STATUS: Berichtsscan läuft");
     }
 
+    private synchronized void beginManualSession(String reportId, ArrayList<String> keys,
+                                                 ArrayList<String> labels) {
+        if (reportId == null || reportId.trim().isEmpty()) return;
+        if (scanState == ScanState.SCANNING || assembler.isSessionActive()) {
+            overlay.update(new AnalysisResult(new ArrayList<>(),
+                    "STATUS | SCAN BEREITS AKTIV\nAKTION | ZUERST BEENDEN", BoxState.INVALID),
+                    captureWidth, captureHeight);
+            return;
+        }
+        manualFieldKeys = keys == null ? new ArrayList<>() : new ArrayList<>(keys);
+        manualFieldLabels = labels == null ? new ArrayList<>() : new ArrayList<>(labels);
+        manualRemaining.clear();
+        manualRemaining.addAll(manualFieldKeys);
+        manualTargetTotal = manualFieldKeys.size();
+        ScannerDatabase.ReportMode mode = database.reportMode(reportId);
+        eventMode = mode.eventMode;
+        resourceField = mode.resourceField;
+        AnalysisResult result = assembler.resumeSession(reportId);
+        if (!assembler.isSessionActive()) {
+            overlay.update(result, captureWidth, captureHeight);
+            return;
+        }
+        evidenceStore.begin(reportId);
+        pendingHeader = null;
+        manualMode = true;
+        scanState = ScanState.SCANNING;
+        outsideReportFrames = 0;
+        overlay.showControl("Nachscan beenden", () -> analysisExecutor.execute(this::finishScanSession));
+        overlay.update(new AnalysisResult(result.boxes,
+                "STATUS | MANUELLER NACHSCAN AKTIV" + manualTargetStatus(), BoxState.PENDING),
+                captureWidth, captureHeight);
+        notifyStatus("STATUS: Manueller Nachscan läuft");
+    }
+
     private synchronized void finishScanSession() {
         if (scanState != ScanState.SCANNING) return;
+        String completedReportId = assembler.currentReportId();
         AnalysisResult result = assembler.finishSession();
         evidenceStore.finish();
         finishedStatus = result.status;
@@ -258,6 +346,33 @@ public final class CaptureService extends Service {
         overlay.hideControl();
         overlay.update(result, captureWidth, captureHeight);
         notifyStatus("STATUS: Bericht gespeichert");
+        manualMode = false;
+        manualFieldKeys.clear();
+        manualFieldLabels.clear();
+        manualRemaining.clear();
+        manualTargetTotal = 0;
+        if (completedReportId != null) new ReportCollageBuilder(this, database).build(completedReportId);
+    }
+
+    private String manualTargetStatus() {
+        if (!manualMode && manualFieldLabels.isEmpty()) return "";
+        int found = Math.max(0, manualTargetTotal - manualRemaining.size());
+        StringBuilder value = new StringBuilder("\nNACHSCAN | ").append(found).append("/")
+                .append(manualTargetTotal).append(" ERKANNT");
+        String label = firstRemainingLabel();
+        if (label != null) {
+            value.append("\nZIEL    | ").append(label.length() > 34 ? label.substring(0, 33) + "…" : label);
+        }
+        return value.toString();
+    }
+
+    private String firstRemainingLabel() {
+        for (int i = 0; i < manualFieldKeys.size(); i++) {
+            if (manualRemaining.contains(manualFieldKeys.get(i))) {
+                return i < manualFieldLabels.size() ? manualFieldLabels.get(i) : manualFieldKeys.get(i);
+            }
+        }
+        return manualTargetTotal > 0 ? "Alle markierten Werte gesehen" : null;
     }
 
     private Bitmap imageToBitmap(Image image, int width, int height) {
@@ -349,6 +464,7 @@ public final class CaptureService extends Service {
         isRunning = false;
         if (!shuttingDown) stopCapture();
         if (recognizer != null) recognizer.close();
+        if (database != null) database.close();
         analysisExecutor.shutdownNow();
         if (captureThread != null) captureThread.quitSafely();
         super.onDestroy();

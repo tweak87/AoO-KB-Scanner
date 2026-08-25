@@ -13,6 +13,8 @@ import com.tweak87.aookbscanner.model.Models.ParticipantFrame;
 import com.tweak87.aookbscanner.model.Models.ScreenType;
 import com.tweak87.aookbscanner.model.Models.Side;
 import com.tweak87.aookbscanner.model.Models.UnitFrame;
+import com.tweak87.aookbscanner.model.Models.OverlayBox;
+import com.tweak87.aookbscanner.review.FieldKeys;
 import com.tweak87.aookbscanner.util.Hashing;
 
 import java.io.ByteArrayOutputStream;
@@ -31,6 +33,7 @@ import java.util.UUID;
 public final class ReportAssembler {
     private final ScannerDatabase database;
     private final Map<Side, Long> activeParticipants = new EnumMap<>(Side.class);
+    private final Map<Side, String> activeOwners = new EnumMap<>(Side.class);
     private String currentReportId;
     private String currentDisplayId;
 
@@ -45,12 +48,25 @@ public final class ReportAssembler {
         String fingerprint = Hashing.sha256("scan-session|" + currentReportId);
         currentDisplayId = displayId(header.battleTimestamp, fingerprint);
         activeParticipants.clear();
+        activeOwners.clear();
         database.insertReport(currentReportId, currentDisplayId, fingerprint,
                 header.battleTimestamp, header.result, header.reportX, header.reportY,
                 header.expectedAttackers == null ? 0 : header.expectedAttackers,
                 header.expectedDefenders == null ? 0 : header.expectedDefenders,
                 eventMode, resourceField);
         return status(header.boxes);
+    }
+
+    /** Reopens an existing report so a selected set of uncertain fields can be scanned again. */
+    public synchronized AnalysisResult resumeSession(String reportId) {
+        if (currentReportId != null || reportId == null || reportId.trim().isEmpty()) {
+            return new AnalysisResult(new ArrayList<>(), "Nachscan konnte nicht gestartet werden", BoxState.INVALID);
+        }
+        currentReportId = reportId;
+        currentDisplayId = database.reportDisplayId(reportId);
+        activeParticipants.clear();
+        activeOwners.clear();
+        return status(new ArrayList<>());
     }
 
     public synchronized AnalysisResult acceptFrame(ParsedFrame frame) {
@@ -84,6 +100,7 @@ public final class ReportAssembler {
         currentReportId = null;
         currentDisplayId = null;
         activeParticipants.clear();
+        activeOwners.clear();
         return new AnalysisResult(new ArrayList<>(), message,
                 progress.complete ? BoxState.VALID : BoxState.PENDING);
     }
@@ -107,6 +124,11 @@ public final class ReportAssembler {
         }
         long active = activeParticipants.containsKey(side)
                 ? activeParticipants.get(side) : database.latestParticipantId(currentReportId, side);
+        String startingOwner = activeOwners.get(side);
+        if ((startingOwner == null || startingOwner.isEmpty()) && active >= 0) {
+            startingOwner = database.participantOwner(active);
+        }
+        annotateOwners(frame, side, startingOwner);
 
         List<Event> events = new ArrayList<>();
         for (ParticipantFrame participant : frame.participants) events.add(Event.participant(participant));
@@ -120,12 +142,15 @@ public final class ReportAssembler {
             if (event.participant != null) {
                 active = database.upsertParticipant(currentReportId, event.participant);
                 activeParticipants.put(side, active);
+                activeOwners.put(side, FieldKeys.owner(event.participant.alliance, event.participant.name,
+                        event.participant.x, event.participant.y));
             } else if (event.unit != null) {
                 UnitFrame unit = event.unit;
                 try {
                     if (active >= 0) {
                         String signature = database.ensureUnitType(unit.iconHash, unit.tierBadgeHash,
                                 png(unit.icon), unit.tier);
+                        remapUnitSignature(frame, unit, signature);
                         database.upsertUnit(active, signature, unit);
                         database.markProgress(active, true, false, false);
                     }
@@ -144,6 +169,31 @@ public final class ReportAssembler {
             }
         }
         if (active >= 0) activeParticipants.put(side, active);
+    }
+
+    private void annotateOwners(ParsedFrame frame, Side side, String startingOwner) {
+        List<ParticipantFrame> participants = new ArrayList<>(frame.participants);
+        participants.sort(Comparator.comparingInt(value -> value.top));
+        for (OverlayBox box : frame.boxes) {
+            if (box.fieldKey == null || !box.fieldKey.contains("|" + FieldKeys.CURRENT_OWNER + "|")) continue;
+            String owner = startingOwner;
+            for (ParticipantFrame participant : participants) {
+                if (participant.top <= box.bounds.centerY()) {
+                    owner = FieldKeys.owner(participant.alliance, participant.name, participant.x, participant.y);
+                } else break;
+            }
+            box.fieldKey = FieldKeys.replaceCurrentOwner(box.fieldKey,
+                    owner == null || owner.isEmpty() ? "unknown" : owner);
+        }
+    }
+
+    private void remapUnitSignature(ParsedFrame frame, UnitFrame unit, String signature) {
+        int tolerance = Math.max(18, unit.bounds == null ? 18 : unit.bounds.height());
+        for (OverlayBox box : frame.boxes) {
+            if (box.fieldKey == null || !box.fieldKey.startsWith("unit|") ||
+                    Math.abs(box.bounds.centerY() - unit.centerY) > tolerance) continue;
+            box.fieldKey = FieldKeys.replaceUnitSignature(box.fieldKey, unit.iconHash, signature);
+        }
     }
 
     private String displayId(String gameTimestamp, String fingerprint) {

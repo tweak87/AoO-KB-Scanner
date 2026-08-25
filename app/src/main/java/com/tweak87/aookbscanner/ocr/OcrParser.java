@@ -13,6 +13,7 @@ import com.tweak87.aookbscanner.model.Models.ParticipantFrame;
 import com.tweak87.aookbscanner.model.Models.ScreenType;
 import com.tweak87.aookbscanner.model.Models.Side;
 import com.tweak87.aookbscanner.model.Models.UnitFrame;
+import com.tweak87.aookbscanner.review.FieldKeys;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -80,12 +81,18 @@ public final class OcrParser {
         ParsedFrame parsed = new ParsedFrame();
         String allText = result.getText();
         String normalizedAll = TextNormalization.normalize(allText);
-        if (normalizedAll.contains("armee info")) {
+        int armyScore = score(normalizedAll, "armee info", "technologiebonus", "uberlebende",
+                "verwundete", "gefallene", "getotete feinde");
+        int battleScore = score(normalizedAll, "schlachtbericht", "angreifer", "verteidiger",
+                "teilnehmer", "insgesamt", "kraftverlust", "details ansehen", "video replay", "position");
+        boolean armyInfo = normalizedAll.contains("armee info") ||
+                ((normalizedAll.contains("angreifer") || normalizedAll.contains("verteidiger")) && armyScore >= 4);
+        boolean battleSummary = (normalizedAll.contains("schlachtbericht") && battleScore >= 3) || battleScore >= 6;
+        if (armyInfo) {
             parsed.screenType = ScreenType.ARMY_INFO;
             parsed.side = findArmySide(lines);
             parseArmyInfo(parsed, lines, elements, frame);
-        } else if (normalizedAll.contains("schlachtbericht") &&
-                (normalizedAll.contains("sieg") || normalizedAll.contains("niederlage") || normalizedAll.contains("details ansehen"))) {
+        } else if (battleSummary) {
             parsed.screenType = ScreenType.BATTLE_SUMMARY;
             parseBattleSummary(parsed, lines, width);
         } else if (looksLikeMessageList(normalizedAll)) {
@@ -196,10 +203,24 @@ public final class OcrParser {
                 if (coordinate.find()) {
                     participant.x = Integer.parseInt(coordinate.group(1));
                     participant.y = Integer.parseInt(coordinate.group(2));
-                    parsed.boxes.add(new OverlayBox(line.bounds, BoxState.VALID));
+                    parsed.boxes.add(new OverlayBox(line.bounds, BoxState.VALID,
+                            FieldKeys.participant(participant.side, participant.alliance, participant.name,
+                                    participant.x, participant.y, "x"),
+                            participant.name + " · Position X", Integer.toString(participant.x), .98f));
+                    parsed.boxes.add(new OverlayBox(line.bounds, BoxState.VALID,
+                            FieldKeys.participant(participant.side, participant.alliance, participant.name,
+                                    participant.x, participant.y, "y"),
+                            participant.name + " · Position Y", Integer.toString(participant.y), .98f));
                 }
             }
-            parsed.boxes.add(new OverlayBox(header.bounds, BoxState.VALID));
+            parsed.boxes.add(new OverlayBox(header.bounds, BoxState.VALID,
+                    FieldKeys.participant(participant.side, participant.alliance, participant.name,
+                            participant.x, participant.y, "name"),
+                    "Spielername", participant.name, .98f));
+            parsed.boxes.add(new OverlayBox(header.bounds, BoxState.VALID,
+                    FieldKeys.participant(participant.side, participant.alliance, participant.name,
+                            participant.x, participant.y, "alliance"),
+                    "Allianz", participant.alliance, .98f));
             parseSummaryFields(parsed, participant, lines, elements, header.bounds.top, end, width, height);
             result.add(participant);
         }
@@ -210,32 +231,52 @@ public final class OcrParser {
                                     List<OcrItem> lines, List<OcrItem> elements,
                                     int start, int end, int width, int height) {
         Set<String> found = new HashSet<>();
+        Map<String, Rect> boundsByField = new HashMap<>();
+        Map<String, Long> valueByField = new HashMap<>();
         for (Map.Entry<String, String> entry : SUMMARY_LABELS.entrySet()) {
             OcrItem labelLine = null;
             Long value = null;
+            Rect fieldBounds = null;
             for (OcrItem line : lines) {
                 if (line.centerY() < start || line.centerY() >= end) continue;
                 if (TextNormalization.normalize(line.text).contains(entry.getKey())) {
                     labelLine = line;
                     OcrItem anchor = findLabelAnchor(elements, entry.getKey(), start, end);
-                    if (anchor != null) value = nearestNumberToRight(elements, anchor, width);
+                    OcrItem valueItem = anchor == null ? null : nearestNumericItemToRight(elements, anchor, width);
+                    if (valueItem != null) value = NumberParser.parseLong(valueItem.text);
                     if (value == null && summaryLabelsInLine(line.text) == 1) {
                         value = NumberParser.parseLong(NumberParser.findLastNumber(line.text));
                     }
+                    fieldBounds = anchor == null ? new Rect(line.bounds) : new Rect(anchor.bounds);
+                    if (valueItem != null) fieldBounds.union(valueItem.bounds);
                     break;
                 }
             }
             if (labelLine != null) {
                 assignSummary(participant, entry.getValue(), value);
                 found.add(entry.getValue());
-                parsed.boxes.add(new OverlayBox(labelLine.bounds, value == null ? BoxState.INVALID : BoxState.VALID));
+                boundsByField.put(entry.getValue(), fieldBounds == null ? new Rect(labelLine.bounds) : fieldBounds);
+                valueByField.put(entry.getValue(), value);
             }
+        }
+        boolean summaryValid = participant.isSummaryValid();
+        for (String field : found) {
+            Long value = valueByField.get(field);
+            float confidence = value == null ? 0f : summaryValid ? .98f : .72f;
+            parsed.boxes.add(new OverlayBox(boundsByField.get(field),
+                    value == null ? BoxState.INVALID : summaryValid ? BoxState.VALID : BoxState.INVALID,
+                    FieldKeys.participant(participant.side, participant.alliance, participant.name,
+                            participant.x, participant.y, field), summaryDisplay(field),
+                    FieldKeys.value(value), confidence));
         }
         boolean fullCardVisible = end < height * 0.88f;
         if (fullCardVisible) {
             String[] ordered = {"total", "powerLoss", "kills", "fallen", "survivors", "wounded"};
             for (int i = 0; i < ordered.length; i++) {
-                if (!found.contains(ordered[i])) parsed.boxes.add(new OverlayBox(estimatedSummaryBox(start, i, width), BoxState.PENDING));
+                String field = ordered[i];
+                if (!found.contains(field)) parsed.boxes.add(new OverlayBox(estimatedSummaryBox(start, i, width),
+                        BoxState.PENDING, FieldKeys.participant(participant.side, participant.alliance,
+                        participant.name, participant.x, participant.y, field), summaryDisplay(field), null, 0f));
             }
         }
     }
@@ -290,8 +331,20 @@ public final class OcrParser {
                 continue;
             }
             unit.tier = findTier(elements, iconBounds, unit.centerY, tolerance * 2);
-            parsed.boxes.add(new OverlayBox(unit.bounds, BoxState.VALID));
-            parsed.boxes.add(new OverlayBox(iconBounds, "?".equals(unit.tier) ? BoxState.PENDING : BoxState.VALID));
+            String[] fields = {"survivors", "wounded", "fallen", "kills"};
+            Long[] values = {unit.survivors, unit.wounded, unit.fallen, unit.kills};
+            String[] labels = {"Überlebende", "Verwundete", "Gefallene", "Getötete Feinde"};
+            for (int i = 0; i < columns.length; i++) {
+                parsed.boxes.add(new OverlayBox(columns[i].bounds, BoxState.VALID,
+                        FieldKeys.unit(parsed.side, FieldKeys.CURRENT_OWNER, unit.iconHash, fields[i]),
+                        "Einheit · " + labels[i], FieldKeys.value(values[i]), .97f));
+            }
+            Rect tierBounds = new Rect(iconBounds.left + Math.round(iconBounds.width() * .52f),
+                    iconBounds.top + Math.round(iconBounds.height() * .50f), iconBounds.right, iconBounds.bottom);
+            parsed.boxes.add(new OverlayBox(tierBounds, "?".equals(unit.tier) ? BoxState.PENDING : BoxState.INVALID,
+                    FieldKeys.unit(parsed.side, FieldKeys.CURRENT_OWNER, unit.iconHash, "tier"),
+                    "Einheit · Stufe", "?".equals(unit.tier) ? null : unit.tier,
+                    "?".equals(unit.tier) ? 0f : .88f));
             units.add(unit);
         }
         return units;
@@ -312,7 +365,8 @@ public final class OcrParser {
             String label = knownLabel == null ? BonusCatalog.canonicalize(rawLabel) : knownLabel;
             String key = TextNormalization.key(label);
             if (label.length() < 3 || key.isEmpty() || isSummaryLabel(normalized) || !containsBonusMarker(normalized)) continue;
-            putBonus(bonuses, label, rawValue, line.bounds, line.centerY());
+            putBonus(bonuses, label, rawValue, line.bounds, line.centerY(),
+                    bonusConfidence(rawLabel, label, knownLabel != null));
         }
 
         // ML Kit often emits the small two-line label and its large value as separate lines.
@@ -353,7 +407,10 @@ public final class OcrParser {
                 if (labels.isEmpty()) {
                     Rect valueBounds = new Rect(values.get(0).bounds);
                     for (OcrItem item : values) valueBounds.union(item.bounds);
-                    parsed.boxes.add(new OverlayBox(valueBounds, BoxState.PENDING));
+                    String rawCandidate = values.get(0).text;
+                    parsed.boxes.add(new OverlayBox(valueBounds, BoxState.PENDING,
+                            FieldKeys.unmatched(parsed.side, valueBounds.centerX(), valueBounds.centerY()),
+                            "Statusname nicht erkannt", rawCandidate, .45f));
                     continue;
                 }
                 labels.sort(Comparator.comparingInt(OcrItem::centerY).thenComparingInt(OcrItem::centerX));
@@ -364,23 +421,33 @@ public final class OcrParser {
                 for (OcrItem item : labels) bounds.union(item.bounds);
                 for (OcrItem item : values) bounds.union(item.bounds);
                 if (canonical == null) {
-                    parsed.boxes.add(new OverlayBox(bounds, BoxState.PENDING));
+                    StringBuilder candidateText = new StringBuilder();
+                    for (OcrItem item : values) candidateText.append(item.text).append(' ');
+                    parsed.boxes.add(new OverlayBox(bounds, BoxState.PENDING,
+                            FieldKeys.unmatched(parsed.side, bounds.centerX(), bounds.centerY()),
+                            rawLabel.toString().trim(), candidateText.toString().trim(), .55f));
                     continue;
                 }
                 StringBuilder rawValue = new StringBuilder();
                 for (OcrItem item : values) rawValue.append(item.text).append(' ');
-                putBonus(bonuses, canonical, rawValue.toString().trim(), bounds, value.centerY());
+                putBonus(bonuses, canonical, rawValue.toString().trim(), bounds, value.centerY(),
+                        bonusConfidence(rawLabel.toString(), canonical, true));
             }
         }
 
         List<BonusFrame> result = new ArrayList<>(bonuses.values());
-        for (BonusFrame bonus : result) parsed.boxes.add(new OverlayBox(bonus.bounds,
-                bonus.primaryValue == null ? BoxState.INVALID : BoxState.VALID));
+        for (BonusFrame bonus : result) {
+            BoxState state = bonus.primaryValue == null ? BoxState.INVALID :
+                    bonus.confidence >= .92f ? BoxState.VALID : BoxState.INVALID;
+            parsed.boxes.add(new OverlayBox(bonus.bounds, state,
+                    FieldKeys.bonus(parsed.side, FieldKeys.CURRENT_OWNER, bonus.label),
+                    bonus.label, bonus.rawValue, bonus.confidence));
+        }
         return result;
     }
 
     private void putBonus(Map<String, BonusFrame> bonuses, String label, String rawValue,
-                          Rect bounds, int centerY) {
+                          Rect bounds, int centerY, float confidence) {
         String key = TextNormalization.key(label);
         BonusFrame current = bonuses.get(key);
         if (current != null && current.primaryValue != null &&
@@ -389,9 +456,18 @@ public final class OcrParser {
         bonus.label = label;
         bonus.rawValue = rawValue;
         bonus.primaryValue = NumberParser.parsePrimaryDecimal(rawValue);
+        bonus.confidence = confidence;
         bonus.bounds = new Rect(bounds);
         bonus.centerY = centerY;
         bonuses.put(key, bonus);
+    }
+
+    private float bonusConfidence(String rawLabel, String canonical, boolean matchedKnown) {
+        String raw = TextNormalization.normalize(rawLabel);
+        String known = TextNormalization.normalize(canonical);
+        if (!raw.isEmpty() && (raw.equals(known) || raw.contains(known) || known.contains(raw))) return .97f;
+        if (configuredStatusAliases.containsKey(raw)) return .95f;
+        return matchedKnown ? .88f : .70f;
     }
 
     private boolean isBonusValue(String text) {
@@ -451,7 +527,7 @@ public final class OcrParser {
         return false;
     }
 
-    private Long nearestNumberToRight(List<OcrItem> elements, OcrItem label, int width) {
+    private OcrItem nearestNumericItemToRight(List<OcrItem> elements, OcrItem label, int width) {
         OcrItem best = null;
         double score = Double.MAX_VALUE;
         for (OcrItem element : elements) {
@@ -461,6 +537,11 @@ public final class OcrParser {
             double candidate = dy * 4.0 + element.centerX() - label.centerX();
             if (candidate < score) { score = candidate; best = element; }
         }
+        return best;
+    }
+
+    private Long nearestNumberToRight(List<OcrItem> elements, OcrItem label, int width) {
+        OcrItem best = nearestNumericItemToRight(elements, label, width);
         return best == null ? null : NumberParser.parseLong(best.text);
     }
 
@@ -507,6 +588,24 @@ public final class OcrParser {
             case "survivors": participant.survivors = value; break;
             case "wounded": participant.wounded = value; break;
         }
+    }
+
+    private String summaryDisplay(String field) {
+        switch (field) {
+            case "total": return "Insgesamt";
+            case "powerLoss": return "Kraftverlust";
+            case "kills": return "Getötete Feinde";
+            case "fallen": return "Gefallene";
+            case "survivors": return "Überlebende";
+            case "wounded": return "Verwundete";
+            default: return field;
+        }
+    }
+
+    private int score(String text, String... markers) {
+        int result = 0;
+        for (String marker : markers) if (text.contains(marker)) result++;
+        return result;
     }
 
     private Rect estimatedSummaryBox(int top, int index, int width) {

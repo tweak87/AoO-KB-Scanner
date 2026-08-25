@@ -19,12 +19,18 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.tweak87.aookbscanner.capture.CaptureService;
+import com.tweak87.aookbscanner.db.ScannerDatabase;
 import com.tweak87.aookbscanner.ui.ReportsActivity;
 import com.tweak87.aookbscanner.ui.StatusConfigActivity;
 import com.tweak87.aookbscanner.ui.UnitConfigActivity;
 import com.tweak87.aookbscanner.util.Ui;
 
+import java.util.ArrayList;
+
 public final class MainActivity extends Activity {
+    public static final String EXTRA_MANUAL_REPORT_ID = "manual_report_id";
+    public static final String EXTRA_MANUAL_FIELD_KEYS = "manual_field_keys";
+    public static final String EXTRA_MANUAL_FIELD_LABELS = "manual_field_labels";
     private static final int REQUEST_OVERLAY = 101;
     private static final int REQUEST_PROJECTION = 102;
     private static final int REQUEST_NOTIFICATIONS = 103;
@@ -35,8 +41,12 @@ public final class MainActivity extends Activity {
     private Button stopButton;
     private Switch eventModeSwitch;
     private Switch resourceFieldSwitch;
+    private TextView manualNotice;
     private boolean pendingStart;
     private boolean waitingForOverlay;
+    private String manualReportId;
+    private ArrayList<String> manualFieldKeys = new ArrayList<>();
+    private ArrayList<String> manualFieldLabels = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle state) {
@@ -50,6 +60,14 @@ public final class MainActivity extends Activity {
                 16, Ui.MUTED);
         page.addView(intro);
         page.addView(Ui.spacer(this, 18));
+
+        manualNotice = Ui.text(this, "", 14, Ui.WHITE);
+        manualNotice.setTypeface(Typeface.MONOSPACE);
+        manualNotice.setPadding(Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10));
+        manualNotice.setBackground(Ui.rounded(Ui.PANEL, Ui.dp(this, 10), Ui.AMBER, Ui.dp(this, 2)));
+        manualNotice.setVisibility(android.view.View.GONE);
+        page.addView(manualNotice);
+        page.addView(Ui.spacer(this, 8));
 
         status = Ui.text(this, "", 18, Ui.WHITE);
         status.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -108,8 +126,8 @@ public final class MainActivity extends Activity {
                         "Grün = erkannt · Gelb = noch offen · Rot = unplausibel. " +
                         "Im Eventmodus werden die Battle-Frenzy-Punkte live angezeigt. Titan und Kampfflugzeug " +
                         "müssen beim ersten Auftreten in der Einheitenkonfiguration zugeordnet werden. " +
-                        "Während eines bestätigten Scans werden veränderte Ansichten als markierte Belegbilder " +
-                        "lokal beim Bericht gespeichert; eine Videodatei entsteht nicht. Es werden keine Daten " +
+                        "Während eines bestätigten Scans werden veränderte Ansichten lokal gespeichert und in der " +
+                        "Prüfung zu einem zusammenhängenden Bild verbunden; eine Videodatei entsteht nicht. Es werden keine Daten " +
                         "ins Internet gesendet.",
                 15, Ui.MUTED);
         help.setLineSpacing(Ui.dp(this, 2), 1.12f);
@@ -119,6 +137,14 @@ public final class MainActivity extends Activity {
         scroll.setFillViewport(true);
         scroll.addView(page);
         setContentView(scroll);
+        readManualRequest(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        readManualRequest(intent);
+        refreshState();
     }
 
     @Override
@@ -136,6 +162,17 @@ public final class MainActivity extends Activity {
     }
 
     private void beginStartFlow() {
+        if (CaptureService.isRunning && manualReportId != null) {
+            Intent service = new Intent(this, CaptureService.class)
+                    .setAction(CaptureService.ACTION_BEGIN_MANUAL)
+                    .putExtra(CaptureService.EXTRA_MANUAL_REPORT_ID, manualReportId)
+                    .putStringArrayListExtra(CaptureService.EXTRA_MANUAL_FIELD_KEYS, manualFieldKeys)
+                    .putStringArrayListExtra(CaptureService.EXTRA_MANUAL_FIELD_LABELS, manualFieldLabels);
+            startService(service);
+            launchGame();
+            Toast.makeText(this, "Nachscan im laufenden Overlay gestartet.", Toast.LENGTH_LONG).show();
+            return;
+        }
         pendingStart = true;
         if (!Settings.canDrawOverlays(this)) {
             waitingForOverlay = true;
@@ -184,6 +221,16 @@ public final class MainActivity extends Activity {
                     .putExtra(CaptureService.EXTRA_EVENT_MODE, eventModeSwitch.isChecked())
                     .putExtra(CaptureService.EXTRA_RESOURCE_FIELD,
                             eventModeSwitch.isChecked() && resourceFieldSwitch.isChecked());
+            if (manualReportId != null) {
+                ScannerDatabase manualDatabase = new ScannerDatabase(this);
+                ScannerDatabase.ReportMode mode = manualDatabase.reportMode(manualReportId);
+                manualDatabase.close();
+                service.putExtra(CaptureService.EXTRA_MANUAL_REPORT_ID, manualReportId)
+                        .putStringArrayListExtra(CaptureService.EXTRA_MANUAL_FIELD_KEYS, manualFieldKeys)
+                        .putStringArrayListExtra(CaptureService.EXTRA_MANUAL_FIELD_LABELS, manualFieldLabels)
+                        .putExtra(CaptureService.EXTRA_EVENT_MODE, mode.eventMode)
+                        .putExtra(CaptureService.EXTRA_RESOURCE_FIELD, mode.resourceField);
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
             else startService(service);
             launchGame();
@@ -211,11 +258,38 @@ public final class MainActivity extends Activity {
         boolean running = CaptureService.isRunning;
         status.setText(running ? "● Scanner läuft" : "○ Scanner gestoppt");
         status.setTextColor(running ? Ui.GREEN : Ui.AMBER);
-        Ui.setEnabled(startButton, !running);
+        startButton.setText(manualReportId == null ? "Scanner starten & Spiel öffnen" :
+                (running ? "Nachscan jetzt starten & Spiel öffnen" : "Scanner für Nachscan starten & Spiel öffnen"));
+        Ui.setEnabled(startButton, !running || manualReportId != null);
         Ui.setEnabled(stopButton, running);
         eventModeSwitch.setEnabled(!running);
         eventModeSwitch.setAlpha(running ? 0.45f : 1f);
         resourceFieldSwitch.setEnabled(!running && eventModeSwitch.isChecked());
         resourceFieldSwitch.setAlpha(!running && eventModeSwitch.isChecked() ? 1f : 0.45f);
+    }
+
+    private void readManualRequest(Intent intent) {
+        if (intent == null) return;
+        manualReportId = intent.getStringExtra(EXTRA_MANUAL_REPORT_ID);
+        ArrayList<String> keys = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_KEYS);
+        ArrayList<String> labels = intent.getStringArrayListExtra(EXTRA_MANUAL_FIELD_LABELS);
+        manualFieldKeys = keys == null ? new ArrayList<>() : keys;
+        manualFieldLabels = labels == null ? new ArrayList<>() : labels;
+        if (manualReportId == null) {
+            manualNotice.setVisibility(android.view.View.GONE);
+            return;
+        }
+        ScannerDatabase manualDatabase = new ScannerDatabase(this);
+        String manualDisplayId = manualDatabase.reportDisplayId(manualReportId);
+        manualDatabase.close();
+        StringBuilder text = new StringBuilder("MANUELLER NACHSCAN\nBERICHT | ")
+                .append(manualDisplayId)
+                .append("\nFELDER   | ").append(manualFieldLabels.size());
+        for (int i = 0; i < Math.min(3, manualFieldLabels.size()); i++) {
+            text.append("\n• ").append(manualFieldLabels.get(i));
+        }
+        if (manualFieldLabels.size() > 3) text.append("\n• … und ").append(manualFieldLabels.size() - 3).append(" weitere");
+        manualNotice.setText(text);
+        manualNotice.setVisibility(android.view.View.VISIBLE);
     }
 }

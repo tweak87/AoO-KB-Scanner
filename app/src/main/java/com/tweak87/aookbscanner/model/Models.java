@@ -29,10 +29,24 @@ public final class Models {
     public static final class OverlayBox {
         public final Rect bounds;
         public final BoxState state;
+        public String fieldKey;
+        public final String label;
+        public final String candidateValue;
+        public final float confidence;
 
         public OverlayBox(Rect bounds, BoxState state) {
+            this(bounds, state, null, null, null,
+                    state == BoxState.VALID ? 1f : state == BoxState.INVALID ? 0.55f : 0f);
+        }
+
+        public OverlayBox(Rect bounds, BoxState state, String fieldKey, String label,
+                          String candidateValue, float confidence) {
             this.bounds = new Rect(bounds);
             this.state = state;
+            this.fieldKey = fieldKey;
+            this.label = label;
+            this.candidateValue = candidateValue;
+            this.confidence = Math.max(0f, Math.min(confidence, 1f));
         }
     }
 
@@ -79,6 +93,7 @@ public final class Models {
         public String label = "";
         public String rawValue = "";
         public Double primaryValue;
+        public float confidence;
         public Rect bounds;
         public int centerY;
     }
